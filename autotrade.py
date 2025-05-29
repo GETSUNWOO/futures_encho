@@ -1,5 +1,5 @@
 """
-AI 비트코인 트레이딩 봇 - 교육용 코드
+AI 비트코인 트레이딩 봇 - Gemini API 버전
 --------------------------------------------------------
 기능:
 - 멀티 타임프레임 분석 (15분, 1시간, 4시간 차트)
@@ -21,7 +21,7 @@ import json  # JSON 데이터 처리
 import sqlite3  # 로컬 데이터베이스
 from dotenv import load_dotenv  # 환경 변수 로드
 load_dotenv()  # .env 파일에서 환경 변수 로드
-from openai import OpenAI  # OpenAI API 접근
+import google.generativeai as genai  # Google Gemini API
 from datetime import datetime  # 날짜 및 시간 처리
 
 # ===== 설정 및 초기화 =====
@@ -39,8 +39,15 @@ exchange = ccxt.binance({
 })
 symbol = "BTC/USDT"  # 거래 페어 설정
 
-# OpenAI API 클라이언트 초기화
-client = OpenAI()
+# Google Gemini API 클라이언트 초기화
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+if not gemini_api_key:
+    raise ValueError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
+
+genai.configure(api_key=gemini_api_key)
+
+# Gemini 모델 설정
+model = genai.GenerativeModel('gemini-1.5-pro')
 
 # SERP API 설정 (뉴스 데이터 수집용)
 serp_api_key = os.getenv("SERP_API_KEY")  # 서프 API 키
@@ -622,10 +629,146 @@ def handle_position_closure(current_price, side, amount, current_trade_id=None):
                 print(f"Avg P/L %: {summary['avg_profit_loss_percentage']:.2f}%")
                 print("=============================")
 
+# ===== Gemini AI 분석 함수 =====
+def get_ai_trading_decision(market_data):
+    """
+    Google Gemini를 사용하여 트레이딩 결정을 받아옵니다
+    
+    매개변수:
+        market_data (dict): 시장 분석 데이터
+        
+    반환값:
+        dict: AI 트레이딩 결정 결과
+    """
+    
+    # Gemini를 위한 시스템 프롬프트 설정
+    system_prompt = """
+You are a crypto trading expert specializing in multi-timeframe analysis and news sentiment analysis applying Kelly criterion to determine optimal position sizing, leverage, and risk management.
+You adhere strictly to Warren Buffett's investment principles:
+
+**Rule No.1: Never lose money.**
+**Rule No.2: Never forget rule No.1.**
+
+Analyze the market data across different timeframes (15m, 1h, 4h), recent news headlines, and historical trading performance to provide your trading decision.
+
+Follow this process:
+1. Review historical trading performance:
+   - Examine the outcomes of recent trades (profit/loss)
+   - Review your previous analysis and trading decisions
+   - Identify what worked well and what didn't
+   - Learn from past mistakes and successful patterns
+   - Compare the performance of LONG vs SHORT positions
+   - Evaluate the effectiveness of your stop-loss and take-profit levels
+   - Assess which leverage settings performed best
+
+2. Assess the current market condition across all timeframes:
+   - Short-term trend (15m): Recent price action and momentum
+   - Medium-term trend (1h): Intermediate market direction
+   - Long-term trend (4h): Overall market bias
+   - Volatility across timeframes
+   - Key support/resistance levels
+   - News sentiment: Analyze recent news article titles for bullish or bearish sentiment
+
+3. Based on your analysis, determine:
+   - Direction: Whether to go LONG or SHORT
+   - Conviction: Probability of success (as a percentage between 51-95%)
+
+4. Calculate Kelly position sizing:
+   - Use the Kelly formula: f* = (p - q/b)
+   - Where:
+     * f* = fraction of capital to risk
+     * p = probability of success (your conviction level)
+     * q = probability of failure (1 - p)
+     * b = win/loss ratio (based on stop loss and take profit distances)
+   - Adjust based on historical win rates and profit/loss ratios
+
+5. Determine optimal leverage:
+   - Based on market volatility across timeframes
+   - Consider higher leverage (up to 20x) in low volatility trending markets
+   - Use lower leverage (1-3x) in high volatility or uncertain markets
+   - Never exceed what is prudent based on your conviction level
+   - Learn from past leverage decisions and their outcomes
+   - Be more conservative if recent high-leverage trades resulted in losses
+
+6. Set optimal Stop Loss (SL) and Take Profit (TP) levels:
+   - Analyze recent price action, support/resistance levels
+   - Consider volatility to prevent premature stop-outs
+   - Set SL at a technical level that would invalidate your trade thesis
+   - Set TP at a realistic target based on technical analysis
+   - Both levels should be expressed as percentages from entry price
+   - Adapt based on historical SL/TP performance and premature stop-outs
+   - Learn from trades that hit SL vs TP and adjust accordingly
+
+7. Apply risk management:
+   - Never recommend betting more than 50% of the Kelly criterion (half-Kelly) to reduce volatility
+   - If expected direction has less than 55% conviction, recommend not taking the trade (use "NO_POSITION")
+   - Adjust leverage to prevent high risk exposure
+   - Be more conservative if recent trades showed losses
+   - If overall win rate is below 50%, be more selective with your entries
+
+8. Provide reasoning:
+   - Explain the rationale behind your trading direction, leverage, and SL/TP recommendations
+   - Highlight key factors from your analysis that influenced your decision
+   - Discuss how historical performance informed your current decision
+   - If applicable, explain how you're adapting based on recent trade outcomes
+   - Mention specific patterns you've observed in successful vs unsuccessful trades
+
+Your response must contain ONLY a valid JSON object with exactly these 6 fields:
+{
+  "direction": "LONG" or "SHORT" or "NO_POSITION",
+  "recommended_position_size": [final recommended position size as decimal between 0.1-1.0],
+  "recommended_leverage": [an integer between 1-20],
+  "stop_loss_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
+  "take_profit_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
+  "reasoning": "Your detailed explanation for all recommendations"
+}
+
+IMPORTANT: Return ONLY the raw JSON object without any markdown formatting or additional text.
+"""
+    
+    try:
+        # 프롬프트 구성 - 시스템 메시지 + 시장 데이터
+        full_prompt = f"{system_prompt}\n\nMarket Data Analysis:\n{json.dumps(market_data, indent=2, default=str)}"
+        
+        # Gemini API 호출
+        response = model.generate_content(full_prompt)
+        
+        # 응답 텍스트 추출
+        response_text = response.text.strip()
+        
+        print(f"Raw Gemini response: {response_text}")  # 디버깅용 출력
+        
+        # JSON 형식 정리 (코드 블록 제거)
+        if "```json" in response_text:
+            # JSON 코드 블록에서 내용만 추출
+            start_idx = response_text.find("```json") + 7
+            end_idx = response_text.find("```", start_idx)
+            if end_idx != -1:
+                response_text = response_text[start_idx:end_idx].strip()
+        elif "```" in response_text:
+            # 일반 코드 블록에서 내용만 추출
+            parts = response_text.split("```")
+            if len(parts) >= 3:
+                response_text = parts[1].strip()
+        
+        # JSON 파싱
+        trading_decision = json.loads(response_text)
+        
+        return trading_decision
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON 파싱 오류: {e}")
+        print(f"Gemini 응답: {response_text}")
+        raise
+    except Exception as e:
+        print(f"Gemini API 호출 오류: {e}")
+        raise
+
 # ===== 메인 프로그램 시작 =====
-print("\n=== Bitcoin Trading Bot Started ===")
+print("\n=== Bitcoin Trading Bot Started (Gemini Powered) ===")
 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("Trading Pair:", symbol)
+print("AI Model: Google Gemini 1.5 Pro")
 print("Dynamic Leverage: AI Optimized")
 print("Dynamic SL/TP: AI Optimized")
 print("Multi Timeframe Analysis: 15m, 1h, 4h")
@@ -736,287 +879,165 @@ while True:
             for tf_name, df in multi_tf_data.items():
                 market_analysis["timeframes"][tf_name] = df.to_dict(orient="records")
             
-            # ===== 6. AI 트레이딩 결정 요청 =====
-            # AI 분석을 위한 시스템 프롬프트 설정
-            system_prompt = """
-You are a crypto trading expert specializing in multi-timeframe analysis and news sentiment analysis applying Kelly criterion to determine optimal position sizing, leverage, and risk management.
-You adhere strictly to Warren Buffett's investment principles:
-
-**Rule No.1: Never lose money.**
-**Rule No.2: Never forget rule No.1.**
-
-Analyze the market data across different timeframes (15m, 1h, 4h), recent news headlines, and historical trading performance to provide your trading decision.
-
-Follow this process:
-1. Review historical trading performance:
-   - Examine the outcomes of recent trades (profit/loss)
-   - Review your previous analysis and trading decisions
-   - Identify what worked well and what didn't
-   - Learn from past mistakes and successful patterns
-   - Compare the performance of LONG vs SHORT positions
-   - Evaluate the effectiveness of your stop-loss and take-profit levels
-   - Assess which leverage settings performed best
-
-2. Assess the current market condition across all timeframes:
-   - Short-term trend (15m): Recent price action and momentum
-   - Medium-term trend (1h): Intermediate market direction
-   - Long-term trend (4h): Overall market bias
-   - Volatility across timeframes
-   - Key support/resistance levels
-   - News sentiment: Analyze recent news article titles for bullish or bearish sentiment
-
-3. Based on your analysis, determine:
-   - Direction: Whether to go LONG or SHORT
-   - Conviction: Probability of success (as a percentage between 51-95%)
-
-4. Calculate Kelly position sizing:
-   - Use the Kelly formula: f* = (p - q/b)
-   - Where:
-     * f* = fraction of capital to risk
-     * p = probability of success (your conviction level)
-     * q = probability of failure (1 - p)
-     * b = win/loss ratio (based on stop loss and take profit distances)
-   - Adjust based on historical win rates and profit/loss ratios
-
-5. Determine optimal leverage:
-   - Based on market volatility across timeframes
-   - Consider higher leverage (up to 20x) in low volatility trending markets
-   - Use lower leverage (1-3x) in high volatility or uncertain markets
-   - Never exceed what is prudent based on your conviction level
-   - Learn from past leverage decisions and their outcomes
-   - Be more conservative if recent high-leverage trades resulted in losses
-
-6. Set optimal Stop Loss (SL) and Take Profit (TP) levels:
-   - Analyze recent price action, support/resistance levels
-   - Consider volatility to prevent premature stop-outs
-   - Set SL at a technical level that would invalidate your trade thesis
-   - Set TP at a realistic target based on technical analysis
-   - Both levels should be expressed as percentages from entry price
-   - Adapt based on historical SL/TP performance and premature stop-outs
-   - Learn from trades that hit SL vs TP and adjust accordingly
-
-7. Apply risk management:
-   - Never recommend betting more than 50% of the Kelly criterion (half-Kelly) to reduce volatility
-   - If expected direction has less than 55% conviction, recommend not taking the trade (use "NO_POSITION")
-   - Adjust leverage to prevent high risk exposure
-   - Be more conservative if recent trades showed losses
-   - If overall win rate is below 50%, be more selective with your entries
-
-8. Provide reasoning:
-   - Explain the rationale behind your trading direction, leverage, and SL/TP recommendations
-   - Highlight key factors from your analysis that influenced your decision
-   - Discuss how historical performance informed your current decision
-   - If applicable, explain how you're adapting based on recent trade outcomes
-   - Mention specific patterns you've observed in successful vs unsuccessful trades
-
-Your response must contain ONLY a valid JSON object with exactly these 6 fields:
-{
-  "direction": "LONG" or "SHORT" or "NO_POSITION",
-  "recommended_position_size": [final recommended position size as decimal between 0.1-1.0],
-  "recommended_leverage": [an integer between 1-20],
-  "stop_loss_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
-  "take_profit_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
-  "reasoning": "Your detailed explanation for all recommendations"
-}
-
-IMPORTANT: Do not format your response as a code block. Do not include ```json, ```, or any other markdown formatting. Return ONLY the raw JSON object.
-"""
+            # ===== 6. Gemini AI 트레이딩 결정 요청 =====
+            trading_decision = get_ai_trading_decision(market_analysis)
             
-            # OpenAI API 호출하여 트레이딩 결정 요청
-            response = client.chat.completions.create(
-                model="gpt-4o",  # GPT-4o 모델 사용
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": str(market_analysis)}
-                ]
-            )
+            # 결정 내용 출력
+            print(f"Gemini AI 거래 결정:")
+            print(f"방향: {trading_decision['direction']}")
+            print(f"추천 포지션 크기: {trading_decision['recommended_position_size']*100:.1f}%")
+            print(f"추천 레버리지: {trading_decision['recommended_leverage']}x")
+            print(f"스탑로스 레벨: {trading_decision['stop_loss_percentage']*100:.2f}%")
+            print(f"테이크프로핏 레벨: {trading_decision['take_profit_percentage']*100:.2f}%")
+            print(f"근거: {trading_decision['reasoning']}")
+            
+            # AI 분석 결과를 데이터베이스에 저장
+            analysis_data = {
+                'current_price': current_price,
+                'direction': trading_decision['direction'],
+                'recommended_position_size': trading_decision['recommended_position_size'],
+                'recommended_leverage': trading_decision['recommended_leverage'],
+                'stop_loss_percentage': trading_decision['stop_loss_percentage'],
+                'take_profit_percentage': trading_decision['take_profit_percentage'],
+                'reasoning': trading_decision['reasoning']
+            }
+            analysis_id = save_ai_analysis(analysis_data)
+            
+            # AI 추천 방향 가져오기
+            action = trading_decision['direction'].lower()
+            
+            # ===== 7. 트레이딩 결정에 따른 액션 실행 =====
+            # 포지션을 열지 말아야 하는 경우
+            if action == "no_position":
+                print("현재 시장 상황에서는 포지션을 열지 않는 것이 좋습니다.")
+                print(f"이유: {trading_decision['reasoning']}")
+                time.sleep(60)  # 포지션 없을 때 1분 대기
+                continue
+                
+            # ===== 8. 투자 금액 계산 =====
+            # 현재 잔액 확인
+            balance = exchange.fetch_balance()
+            available_capital = balance['USDT']['free']  # 가용 USDT 잔액
+            
+            # AI 추천 포지션 크기 비율 적용
+            position_size_percentage = trading_decision['recommended_position_size']
+            investment_amount = available_capital * position_size_percentage
+            
+            # 최소 주문 금액 확인 (최소 100 USDT)
+            if investment_amount < 100:
+                investment_amount = 100
+                print(f"최소 주문 금액(100 USDT)으로 조정됨")
+            
+            print(f"투자 금액: {investment_amount:.2f} USDT")
+            
+            # ===== 9. 주문 수량 계산 =====
+            # BTC 수량 = 투자금액 / 현재가격, 소수점 3자리까지 반올림
+            amount = math.ceil((investment_amount / current_price) * 1000) / 1000
+            print(f"주문 수량: {amount} BTC")
 
-            # ===== 7. AI 응답 처리 및 거래 실행 =====
-            try:
-                # API 응답에서 내용 추출
-                response_content = response.choices[0].message.content.strip()
-                print(f"Raw AI response: {response_content}")  # 디버깅용 출력
+            # ===== 10. 레버리지 설정 =====
+            # AI 추천 레버리지 설정
+            recommended_leverage = trading_decision['recommended_leverage']
+            exchange.set_leverage(recommended_leverage, symbol)
+            print(f"레버리지 설정: {recommended_leverage}x")
+
+            # ===== 11. 스탑로스/테이크프로핏 설정 =====
+            # AI 추천 SL/TP 비율 가져오기
+            sl_percentage = trading_decision['stop_loss_percentage']
+            tp_percentage = trading_decision['take_profit_percentage']
+
+            # ===== 12. 포지션 진입 및 SL/TP 주문 실행 =====
+            if action == "long":  # 롱 포지션
+                # 시장가 매수 주문
+                order = exchange.create_market_buy_order(symbol, amount)
+                entry_price = current_price
                 
-                # JSON 형식 정리 (코드 블록 제거)
-                if response_content.startswith("```"):
-                    # 첫 번째 줄바꿈 이후부터 마지막 ``` 이전까지의 내용만 추출
-                    content_parts = response_content.split("\n", 1)
-                    if len(content_parts) > 1:
-                        response_content = content_parts[1]
-                    # 마지막 ``` 제거
-                    if "```" in response_content:
-                        response_content = response_content.rsplit("```", 1)[0]
-                    response_content = response_content.strip()
+                # 스탑로스/테이크프로핏 가격 계산
+                sl_price = round(entry_price * (1 - sl_percentage), 2)   # AI 추천 비율만큼 하락
+                tp_price = round(entry_price * (1 + tp_percentage), 2)   # AI 추천 비율만큼 상승
                 
-                # JSON 파싱
-                trading_decision = json.loads(response_content)
+                # SL/TP 주문 생성
+                exchange.create_order(symbol, 'STOP_MARKET', 'sell', amount, None, {'stopPrice': sl_price})
+                exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell', amount, None, {'stopPrice': tp_price})
                 
-                # 결정 내용 출력
-                print(f"AI 거래 결정:")
-                print(f"방향: {trading_decision['direction']}")
-                print(f"추천 포지션 크기: {trading_decision['recommended_position_size']*100:.1f}%")
-                print(f"추천 레버리지: {trading_decision['recommended_leverage']}x")
-                print(f"스탑로스 레벨: {trading_decision['stop_loss_percentage']*100:.2f}%")
-                print(f"테이크프로핏 레벨: {trading_decision['take_profit_percentage']*100:.2f}%")
-                print(f"근거: {trading_decision['reasoning']}")
-                
-                # AI 분석 결과를 데이터베이스에 저장
-                analysis_data = {
-                    'current_price': current_price,
-                    'direction': trading_decision['direction'],
-                    'recommended_position_size': trading_decision['recommended_position_size'],
-                    'recommended_leverage': trading_decision['recommended_leverage'],
-                    'stop_loss_percentage': trading_decision['stop_loss_percentage'],
-                    'take_profit_percentage': trading_decision['take_profit_percentage'],
-                    'reasoning': trading_decision['reasoning']
+                # 거래 데이터 저장
+                trade_data = {
+                    'action': 'long',
+                    'entry_price': entry_price,
+                    'amount': amount,
+                    'leverage': recommended_leverage,
+                    'sl_price': sl_price,
+                    'tp_price': tp_price,
+                    'sl_percentage': sl_percentage,
+                    'tp_percentage': tp_percentage,
+                    'position_size_percentage': position_size_percentage,
+                    'investment_amount': investment_amount
                 }
-                analysis_id = save_ai_analysis(analysis_data)
+                trade_id = save_trade(trade_data)
                 
-                # AI 추천 방향 가져오기
-                action = trading_decision['direction'].lower()
+                # AI 분석 결과와 거래 연결
+                update_analysis_sql = "UPDATE ai_analysis SET trade_id = ? WHERE id = ?"
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute(update_analysis_sql, (trade_id, analysis_id))
+                conn.commit()
+                conn.close()
                 
-                # ===== 8. 트레이딩 결정에 따른 액션 실행 =====
-                # 포지션을 열지 말아야 하는 경우
-                if action == "no_position":
-                    print("현재 시장 상황에서는 포지션을 열지 않는 것이 좋습니다.")
-                    print(f"이유: {trading_decision['reasoning']}")
-                    time.sleep(60)  # 포지션 없을 때 1분 대기
-                    continue
-                    
-                # ===== 9. 투자 금액 계산 =====
-                # 현재 잔액 확인
-                balance = exchange.fetch_balance()
-                available_capital = balance['USDT']['free']  # 가용 USDT 잔액
-                
-                # AI 추천 포지션 크기 비율 적용
-                position_size_percentage = trading_decision['recommended_position_size']
-                investment_amount = available_capital * position_size_percentage
-                
-                # 최소 주문 금액 확인 (최소 100 USDT)
-                if investment_amount < 100:
-                    investment_amount = 100
-                    print(f"최소 주문 금액(100 USDT)으로 조정됨")
-                
-                print(f"투자 금액: {investment_amount:.2f} USDT")
-                
-                # ===== 10. 주문 수량 계산 =====
-                # BTC 수량 = 투자금액 / 현재가격, 소수점 3자리까지 반올림
-                amount = math.ceil((investment_amount / current_price) * 1000) / 1000
-                print(f"주문 수량: {amount} BTC")
+                print(f"\n=== LONG Position Opened ===")
+                print(f"Entry: ${entry_price:,.2f}")
+                print(f"Stop Loss: ${sl_price:,.2f} (-{sl_percentage*100:.2f}%)")
+                print(f"Take Profit: ${tp_price:,.2f} (+{tp_percentage*100:.2f}%)")
+                print(f"Leverage: {recommended_leverage}x")
+                print(f"분석 근거: {trading_decision['reasoning']}")
+                print("===========================")
 
-                # ===== 11. 레버리지 설정 =====
-                # AI 추천 레버리지 설정
-                recommended_leverage = trading_decision['recommended_leverage']
-                exchange.set_leverage(recommended_leverage, symbol)
-                print(f"레버리지 설정: {recommended_leverage}x")
+            elif action == "short":  # 숏 포지션
+                # 시장가 매도 주문
+                order = exchange.create_market_sell_order(symbol, amount)
+                entry_price = current_price
+                
+                # 스탑로스/테이크프로핏 가격 계산
+                sl_price = round(entry_price * (1 + sl_percentage), 2)   # AI 추천 비율만큼 상승
+                tp_price = round(entry_price * (1 - tp_percentage), 2)   # AI 추천 비율만큼 하락
+                
+                # SL/TP 주문 생성
+                exchange.create_order(symbol, 'STOP_MARKET', 'buy', amount, None, {'stopPrice': sl_price})
+                exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'buy', amount, None, {'stopPrice': tp_price})
+                
+                # 거래 데이터 저장
+                trade_data = {
+                    'action': 'short',
+                    'entry_price': entry_price,
+                    'amount': amount,
+                    'leverage': recommended_leverage,
+                    'sl_price': sl_price,
+                    'tp_price': tp_price,
+                    'sl_percentage': sl_percentage,
+                    'tp_percentage': tp_percentage,
+                    'position_size_percentage': position_size_percentage,
+                    'investment_amount': investment_amount
+                }
+                trade_id = save_trade(trade_data)
+                
+                # AI 분석 결과와 거래 연결
+                update_analysis_sql = "UPDATE ai_analysis SET trade_id = ? WHERE id = ?"
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute(update_analysis_sql, (trade_id, analysis_id))
+                conn.commit()
+                conn.close()
+                
+                print(f"\n=== SHORT Position Opened ===")
+                print(f"Entry: ${entry_price:,.2f}")
+                print(f"Stop Loss: ${sl_price:,.2f} (+{sl_percentage*100:.2f}%)")
+                print(f"Take Profit: ${tp_price:,.2f} (-{tp_percentage*100:.2f}%)")
+                print(f"Leverage: {recommended_leverage}x")
+                print(f"분석 근거: {trading_decision['reasoning']}")
+                print("============================")
+            else:
+                print("Action이 'long' 또는 'short'가 아니므로 주문을 실행하지 않습니다.")
 
-                # ===== 12. 스탑로스/테이크프로핏 설정 =====
-                # AI 추천 SL/TP 비율 가져오기
-                sl_percentage = trading_decision['stop_loss_percentage']
-                tp_percentage = trading_decision['take_profit_percentage']
-
-                # ===== 13. 포지션 진입 및 SL/TP 주문 실행 =====
-                if action == "long":  # 롱 포지션
-                    # 시장가 매수 주문
-                    order = exchange.create_market_buy_order(symbol, amount)
-                    entry_price = current_price
-                    
-                    # 스탑로스/테이크프로핏 가격 계산
-                    sl_price = round(entry_price * (1 - sl_percentage), 2)   # AI 추천 비율만큼 하락
-                    tp_price = round(entry_price * (1 + tp_percentage), 2)   # AI 추천 비율만큼 상승
-                    
-                    # SL/TP 주문 생성
-                    exchange.create_order(symbol, 'STOP_MARKET', 'sell', amount, None, {'stopPrice': sl_price})
-                    exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell', amount, None, {'stopPrice': tp_price})
-                    
-                    # 거래 데이터 저장
-                    trade_data = {
-                        'action': 'long',
-                        'entry_price': entry_price,
-                        'amount': amount,
-                        'leverage': recommended_leverage,
-                        'sl_price': sl_price,
-                        'tp_price': tp_price,
-                        'sl_percentage': sl_percentage,
-                        'tp_percentage': tp_percentage,
-                        'position_size_percentage': position_size_percentage,
-                        'investment_amount': investment_amount
-                    }
-                    trade_id = save_trade(trade_data)
-                    
-                    # AI 분석 결과와 거래 연결
-                    update_analysis_sql = "UPDATE ai_analysis SET trade_id = ? WHERE id = ?"
-                    conn = sqlite3.connect(DB_FILE)
-                    cursor = conn.cursor()
-                    cursor.execute(update_analysis_sql, (trade_id, analysis_id))
-                    conn.commit()
-                    conn.close()
-                    
-                    print(f"\n=== LONG Position Opened ===")
-                    print(f"Entry: ${entry_price:,.2f}")
-                    print(f"Stop Loss: ${sl_price:,.2f} (-{sl_percentage*100:.2f}%)")
-                    print(f"Take Profit: ${tp_price:,.2f} (+{tp_percentage*100:.2f}%)")
-                    print(f"Leverage: {recommended_leverage}x")
-                    print(f"분석 근거: {trading_decision['reasoning']}")
-                    print("===========================")
-
-                elif action == "short":  # 숏 포지션
-                    # 시장가 매도 주문
-                    order = exchange.create_market_sell_order(symbol, amount)
-                    entry_price = current_price
-                    
-                    # 스탑로스/테이크프로핏 가격 계산
-                    sl_price = round(entry_price * (1 + sl_percentage), 2)   # AI 추천 비율만큼 상승
-                    tp_price = round(entry_price * (1 - tp_percentage), 2)   # AI 추천 비율만큼 하락
-                    
-                    # SL/TP 주문 생성
-                    exchange.create_order(symbol, 'STOP_MARKET', 'buy', amount, None, {'stopPrice': sl_price})
-                    exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'buy', amount, None, {'stopPrice': tp_price})
-                    
-                    # 거래 데이터 저장
-                    trade_data = {
-                        'action': 'short',
-                        'entry_price': entry_price,
-                        'amount': amount,
-                        'leverage': recommended_leverage,
-                        'sl_price': sl_price,
-                        'tp_price': tp_price,
-                        'sl_percentage': sl_percentage,
-                        'tp_percentage': tp_percentage,
-                        'position_size_percentage': position_size_percentage,
-                        'investment_amount': investment_amount
-                    }
-                    trade_id = save_trade(trade_data)
-                    
-                    # AI 분석 결과와 거래 연결
-                    update_analysis_sql = "UPDATE ai_analysis SET trade_id = ? WHERE id = ?"
-                    conn = sqlite3.connect(DB_FILE)
-                    cursor = conn.cursor()
-                    cursor.execute(update_analysis_sql, (trade_id, analysis_id))
-                    conn.commit()
-                    conn.close()
-                    
-                    print(f"\n=== SHORT Position Opened ===")
-                    print(f"Entry: ${entry_price:,.2f}")
-                    print(f"Stop Loss: ${sl_price:,.2f} (+{sl_percentage*100:.2f}%)")
-                    print(f"Take Profit: ${tp_price:,.2f} (-{tp_percentage*100:.2f}%)")
-                    print(f"Leverage: {recommended_leverage}x")
-                    print(f"분석 근거: {trading_decision['reasoning']}")
-                    print("============================")
-                else:
-                    print("Action이 'long' 또는 'short'가 아니므로 주문을 실행하지 않습니다.")
-                    
-            except json.JSONDecodeError as e:
-                print(f"JSON 파싱 오류: {e}")
-                print(f"AI 응답: {response.choices[0].message.content}")
-                time.sleep(30)  # 대기 후 다시 시도
-                continue
-            except Exception as e:
-                print(f"기타 오류: {e}")
-                time.sleep(10)
-                continue
-
-        # ===== 14. 일정 시간 대기 후 다음 루프 실행 =====
+        # ===== 13. 일정 시간 대기 후 다음 루프 실행 =====
         time.sleep(60)  # 메인 루프는 1분마다 실행
 
     except Exception as e:

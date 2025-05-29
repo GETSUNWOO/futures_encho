@@ -1,6 +1,7 @@
 python-dotenv # 환경변수 불러오기
-openai # gpt
+google-generativeai # Google Gemini API
 ccxt  # 바이낸스
 pandas # 데이터 처리
 streamlit
 plotly
+requests # HTTP 요청 (뉴스 API용)
