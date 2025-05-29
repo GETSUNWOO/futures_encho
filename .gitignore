@@ -1,0 +1,10 @@
+# 환경변수 파일 (매우 중요!)
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# 가상환경
+venv/
+.vscode/

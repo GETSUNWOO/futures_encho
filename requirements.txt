@@ -1,0 +1,6 @@
+python-dotenv # 환경변수 불러오기
+openai # gpt
+ccxt  # 바이낸스
+pandas # 데이터 처리
+streamlit
+plotly
