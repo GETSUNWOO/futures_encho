@@ -8,3 +8,8 @@
 # 가상환경
 venv/
 .vscode/
+
+# Python 캐시 파일 및 컴파일된 바이트코드 무시
+__pycache__/
+*.py[cod]
+*$py.class

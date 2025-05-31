@@ -1,9 +1,10 @@
+
 """
 AI 비트코인 트레이딩 봇 V2 - 모듈화된 메인 루프
 - 실거래/시뮬레이션 모드 지원
 - Gemini AI 기반 트레이딩 결정
 - 자동 포지션 관리 및 성과 추적
-- 기존 autotrade.py의 모듈화된 버전
+- 모드별 DB 분리 적용
 """
 import time
 import ccxt

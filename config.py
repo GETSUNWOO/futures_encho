@@ -3,6 +3,7 @@
 - 환경 변수 로드
 - 거래 모드 설정 (실거래/시뮬레이션)
 - API 키 및 기본 설정값 관리
+- DB 파일 모드별 분리
 """
 import os
 from dotenv import load_dotenv
@@ -24,9 +25,6 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     SERP_API_KEY = os.getenv("SERP_API_KEY")  # 선택사항
     
-    # 데이터베이스 설정
-    DB_FILE = os.getenv("DB_FILE", "bitcoin_trading.db")
-    
     # 거래 설정
     SYMBOL = "BTC/USDT"
     MIN_INVESTMENT_AMOUNT = float(os.getenv("MIN_INVESTMENT_AMOUNT", "100"))  # 최소 투자 금액
@@ -44,6 +42,21 @@ class Config:
             'adjustForTimeDifference': True
         }
     }
+    
+    @classmethod
+    def get_db_file(cls) -> str:
+        """
+        거래 모드에 따른 DB 파일명 반환
+        
+        Returns:
+            str: DB 파일 경로
+        """
+        base_name = os.getenv("DB_FILE_BASE", "bitcoin_trading")
+        
+        if cls.is_real_trading():
+            return f"{base_name}_REAL.db"
+        else:
+            return f"{base_name}_TEST.db"
     
     @classmethod
     def validate_config(cls) -> None:
@@ -102,10 +115,14 @@ class Config:
     @classmethod
     def print_config_summary(cls) -> None:
         """설정 요약 정보 출력"""
-        print("\n=== Configuration Summary ===")
+        db_file = cls.get_db_file()
+        
+        print("\n" + "="*50)
+        print("         CONFIGURATION SUMMARY")
+        print("="*50)
         print(f"Trading Mode: {cls.get_trading_mode_display()}")
         print(f"Symbol: {cls.SYMBOL}")
-        print(f"Database: {cls.DB_FILE}")
+        print(f"Database: {db_file}")
         print(f"Min Investment: ${cls.MIN_INVESTMENT_AMOUNT:,.2f}")
         
         if cls.is_test_trading():
@@ -113,12 +130,19 @@ class Config:
         
         print(f"Main Loop Interval: {cls.MAIN_LOOP_INTERVAL}s")
         print(f"Position Check Interval: {cls.POSITION_CHECK_INTERVAL}s")
+        print()
+        print("API Status:")
+        print(f"  Gemini API: {'✓ Ready' if cls.GEMINI_API_KEY else '✗ Missing'}")
+        print(f"  Binance API: {'✓ Available' if cls.BINANCE_API_KEY else '✗ Missing'}")
+        print(f"  SERP API: {'✓ Available' if cls.SERP_API_KEY else '✗ Missing (Optional)'}")
+        print()
         
-        # API 키 상태 표시 (보안상 일부만)
-        print(f"Gemini API: {'✓' if cls.GEMINI_API_KEY else '✗'}")
-        print(f"Binance API: {'✓' if cls.BINANCE_API_KEY else '✗'}")
-        print(f"SERP API: {'✓' if cls.SERP_API_KEY else '✗ (Optional)'}")
-        print("============================\n")
+        if cls.is_test_trading():
+            print("✅ Safe simulation mode - no real money at risk")
+        else:
+            print("🚨 REAL TRADING MODE - Real money at risk!")
+        
+        print("="*50 + "\n")
     
     @classmethod
     def get_env_template(cls) -> str:
@@ -138,7 +162,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 SERP_API_KEY=your_serp_api_key_here
 
 # Database
-DB_FILE=bitcoin_trading.db
+DB_FILE_BASE=bitcoin_trading
 
 # Trading Settings
 MIN_INVESTMENT_AMOUNT=100
@@ -153,8 +177,9 @@ POSITION_CHECK_INTERVAL=5
 # 설정 검증 실행
 try:
     Config.validate_config()
+    print("✅ Configuration validated successfully")
 except ValueError as e:
-    print(f"Configuration Error: {e}")
+    print(f"❌ Configuration Error: {e}")
     print("\nPlease check your .env file. Here's a template:")
     print(Config.get_env_template())
     exit(1)
