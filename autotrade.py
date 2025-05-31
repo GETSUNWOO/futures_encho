@@ -138,14 +138,14 @@ def save_ai_analysis(analysis_data, trade_id=None):
         trade_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        datetime.now().isoformat(),  # 현재 시간
-        analysis_data.get('current_price', 0),  # 현재 가격
-        analysis_data.get('direction', 'NO_POSITION'),  # 추천 방향
+        datetime.now().isoformat(),                         # 현재 시간
+        analysis_data.get('current_price', 0),              # 현재 가격
+        analysis_data.get('direction', 'NO_POSITION'),      # 추천 방향
         analysis_data.get('recommended_position_size', 0),  # 추천 포지션 크기
-        analysis_data.get('recommended_leverage', 0),  # 추천 레버리지
-        analysis_data.get('stop_loss_percentage', 0),  # 스탑로스 비율
-        analysis_data.get('take_profit_percentage', 0),  # 테이크프로핏 비율
-        analysis_data.get('reasoning', ''),  # 분석 근거
+        analysis_data.get('recommended_leverage', 0),       # 추천 레버리지
+        analysis_data.get('stop_loss_percentage', 0),       # 스탑로스 비율
+        analysis_data.get('take_profit_percentage', 0),     # 테이크프로핏 비율
+        analysis_data.get('reasoning', ''),                 # 분석 근거
         trade_id  # 연결된 거래 ID
     ))
     
