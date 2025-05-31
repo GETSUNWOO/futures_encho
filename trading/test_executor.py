@@ -23,6 +23,10 @@ class TestExecutor(BaseExecutor):
         self.current_balance = initial_balance
         self.current_position: Optional[Dict[str, Any]] = None
         self.order_id_counter = 1
+
+        # 안전장치용 상태 변수
+        self._closing_in_progress = False
+        self._last_trigger_check = 0
         
         print(f"Test mode initialized with ${initial_balance:,.2f} USDT")
     
@@ -171,20 +175,23 @@ class TestExecutor(BaseExecutor):
         }
     
     def close_position(self, reason: str = "manual") -> Dict[str, Any]:
-        """
-        현재 포지션 강제 종료 (시뮬레이션)
+        """현재 포지션 강제 종료 - 중복 방지 안전장치 추가"""
         
-        Args:
-            reason: 종료 사유
-            
-        Returns:
-            종료 결과 정보
-        """
+        # 1. 포지션 존재 확인
         if not self.current_position:
             return {
                 'success': False,
                 'message': 'No open position to close'
             }
+        
+        # 2. 중복 청산 방지
+        if self._closing_in_progress:
+            return {
+                'success': False,
+                'message': 'Position close already in progress'
+            }
+        
+        self._closing_in_progress = True
         
         try:
             side = self.current_position['side']
@@ -220,6 +227,7 @@ class TestExecutor(BaseExecutor):
                 'order_id': f"SIM_CLOSE_{self.order_id_counter}"
             }
             
+            # 포지션 상태 초기화
             self.current_position = None
             self.order_id_counter += 1
             
@@ -231,6 +239,9 @@ class TestExecutor(BaseExecutor):
                 'success': False,
                 'message': f'Error closing position: {e}'
             }
+        finally:
+            # 청산 진행 플래그 해제 (반드시 실행)
+            self._closing_in_progress = False
     
     def update_market_price(self, current_price: float) -> None:
         """
@@ -242,17 +253,16 @@ class TestExecutor(BaseExecutor):
         self._current_market_price = current_price
     
     def check_sl_tp_triggers(self, current_price: float, sl_price: float, tp_price: float) -> Optional[str]:
-        """
-        SL/TP 트리거 조건 확인 (시뮬레이션용)
+        """SL/TP 트리거 조건 확인 - 중복 방지 안전장치 추가"""
         
-        Args:
-            current_price: 현재 가격
-            sl_price: 스탑로스 가격
-            tp_price: 테이크프로핏 가격
-            
-        Returns:
-            트리거된 주문 타입 ('stop_loss', 'take_profit', None)
-        """
+        # 1. 중복 체크 방지 (0.5초 이내)
+        current_time = time.time()
+        if current_time - self._last_trigger_check < 0.5:
+            return None
+        
+        self._last_trigger_check = current_time
+        
+        # 2. 포지션 존재 확인
         if not self.current_position:
             return None
         

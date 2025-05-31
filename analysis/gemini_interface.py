@@ -19,7 +19,10 @@ class GeminiInterface:
             api_key: Gemini API 키
         """
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        
+        # 모델 설정
+        self.model_name = 'gemini-2.0-flash-lite'  # 모델명 저장
+        self.model = genai.GenerativeModel(self.model_name)
         
         # 시스템 프롬프트 정의
         self.system_prompt = """
@@ -94,18 +97,33 @@ Follow this process:
    - Mention specific patterns you've observed in successful vs unsuccessful trades
 
 Your response must contain ONLY a valid JSON object with exactly these 6 fields:
+
+For LONG or SHORT positions:
 {
-  "direction": "LONG" or "SHORT" or "NO_POSITION",
-  "recommended_position_size": [final recommended position size as decimal between 0.1-1.0],
-  "recommended_leverage": [an integer between 1-20],
-  "stop_loss_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
-  "take_profit_percentage": [percentage distance from entry as decimal, e.g., 0.005 for 0.5%],
+  "direction": "LONG" or "SHORT",
+  "recommended_position_size": [decimal between 0.1-1.0, e.g., 0.25 for 25%],
+  "recommended_leverage": [integer between 1-20],
+  "stop_loss_percentage": [percentage as decimal, e.g., 0.005 for 0.5%],
+  "take_profit_percentage": [percentage as decimal, e.g., 0.015 for 1.5%],
   "reasoning": "Your detailed explanation for all recommendations"
 }
 
-IMPORTANT: Return ONLY the raw JSON object without any markdown formatting or additional text.
+For NO_POSITION (when market conditions are unclear or risky):
+{
+  "direction": "NO_POSITION",
+  "recommended_position_size": 0.0,
+  "recommended_leverage": 1,
+  "stop_loss_percentage": 0.005,
+  "take_profit_percentage": 0.015,
+  "reasoning": "Your detailed explanation for why no position is recommended"
+}
+
+IMPORTANT: 
+- Return ONLY the raw JSON object without any markdown formatting or additional text.
+- For NO_POSITION, always set recommended_position_size to 0.0
+- For LONG/SHORT, recommended_position_size must be between 0.1 and 1.0
 """
-    
+
     def get_trading_decision(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         시장 데이터를 바탕으로 AI 트레이딩 결정을 요청
@@ -174,7 +192,7 @@ IMPORTANT: Return ONLY the raw JSON object without any markdown formatting or ad
     
     def _validate_response(self, trading_decision: Dict[str, Any]) -> None:
         """
-        AI 응답의 유효성 검증
+        AI 응답의 유효성 검증 - NO_POSITION 시 position_size 0.0 허용
         
         Args:
             trading_decision: AI 응답 데이터
@@ -198,8 +216,15 @@ IMPORTANT: Return ONLY the raw JSON object without any markdown formatting or ad
             raise ValueError(f"Invalid direction: {direction}")
         
         position_size = trading_decision['recommended_position_size']
-        if not (0.1 <= position_size <= 1.0):
-            raise ValueError(f"Position size out of range: {position_size}")
+        
+        # NO_POSITION일 때는 position_size 0.0 허용
+        if direction == 'NO_POSITION':
+            if not (0.0 <= position_size <= 1.0):
+                raise ValueError(f"Position size out of range for NO_POSITION: {position_size}")
+        else:
+            # LONG/SHORT일 때는 기존 검증 (0.1 이상)
+            if not (0.1 <= position_size <= 1.0):
+                raise ValueError(f"Position size out of range for {direction}: {position_size}")
         
         leverage = trading_decision['recommended_leverage']
         if not (1 <= leverage <= 20):
@@ -209,19 +234,95 @@ IMPORTANT: Return ONLY the raw JSON object without any markdown formatting or ad
         tp_pct = trading_decision['take_profit_percentage']
         if not (0 < sl_pct < 1) or not (0 < tp_pct < 1):
             raise ValueError(f"Invalid SL/TP percentages: SL={sl_pct}, TP={tp_pct}")
+        
+        print(f"✅ AI 응답 검증 완료: {direction} (size: {position_size*100:.1f}%)")
     
     def print_decision(self, trading_decision: Dict[str, Any]) -> None:
         """
-        트레이딩 결정 내용을 콘솔에 출력
+        트레이딩 결정 내용을 콘솔에 출력 - 동적 모델명 사용
         
         Args:
             trading_decision: AI 트레이딩 결정 결과
         """
-        print(f"\n=== Gemini AI Trading Decision ===")
+        model_name = self.get_model_name()
+        print(f"\n=== {model_name} AI Decision ===")
         print(f"Direction: {trading_decision['direction']}")
         print(f"Position Size: {trading_decision['recommended_position_size']*100:.1f}%")
         print(f"Leverage: {trading_decision['recommended_leverage']}x")
         print(f"Stop Loss: {trading_decision['stop_loss_percentage']*100:.2f}%")
         print(f"Take Profit: {trading_decision['take_profit_percentage']*100:.2f}%")
         print(f"Reasoning: {trading_decision['reasoning'][:100]}...")
-        print("==================================")
+        print("=" * (len(model_name) + 15))
+
+    def get_model_name(self) -> str:
+        """
+        현재 사용 중인 모델명을 사용자 친화적 형태로 반환
+    
+        Returns:
+        사용자 친화적 모델명
+        """
+        model_display_names = {
+            'gemini-1.5-pro': 'Google Gemini 1.5 Pro',
+            'gemini-1.5-flash': 'Google Gemini 1.5 Flash',
+            'gemini-2.0-flash': 'Google Gemini 2.0 Flash',
+            'gemini-2.0-flash-lite': 'Google Gemini 2.0 Flash-Lite',
+            'gemini-pro': 'Google Gemini Pro',
+            'gemini-flash': 'Google Gemini Flash'
+        }   
+    
+    # 현재 모델명에 해당하는 표시명 반환
+        return model_display_names.get(self.model_name, f'Google Gemini ({self.model_name})')
+    
+    def get_model_info(self) -> dict:
+        """
+        현재 모델의 상세 정보 반환
+        
+        Returns:
+            모델 정보 딕셔너리
+        """
+        model_info = {
+            'gemini-1.5-pro': {
+                'name': 'Google Gemini 1.5 Pro',
+                'version': '1.5',
+                'tier': 'Pro',
+                'cost_per_1m_tokens': '$2.19',
+                'speed': 'Standard',
+                'context_window': '2M tokens'
+            },
+            'gemini-2.0-flash': {
+                'name': 'Google Gemini 2.0 Flash',
+                'version': '2.0',
+                'tier': 'Flash',
+                'cost_per_1m_tokens': '$0.17',
+                'speed': 'Fast',
+                'context_window': '1M tokens'
+            },
+            'gemini-2.0-flash-lite': {
+                'name': 'Google Gemini 2.0 Flash-Lite',
+                'version': '2.0',
+                'tier': 'Flash-Lite',
+                'cost_per_1m_tokens': '$0.13',
+                'speed': 'Very Fast',
+                'context_window': '1M tokens'
+            }
+        }
+        
+        return model_info.get(self.model_name, {
+            'name': f'Google Gemini ({self.model_name})',
+            'version': 'Unknown',
+            'tier': 'Unknown',
+            'cost_per_1m_tokens': 'Unknown',
+            'speed': 'Unknown',
+            'context_window': 'Unknown'
+        })
+    
+    def print_model_info(self) -> None:
+        """현재 모델 정보를 자세히 출력"""
+        info = self.get_model_info()
+        print(f"\n🤖 AI Model Information:")
+        print(f"   Model: {info['name']}")
+        print(f"   Version: {info['version']}")
+        print(f"   Tier: {info['tier']}")
+        print(f"   Cost: {info['cost_per_1m_tokens']} per 1M tokens")
+        print(f"   Speed: {info['speed']}")
+        print(f"   Context: {info['context_window']}")

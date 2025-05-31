@@ -8,6 +8,7 @@ AI 비트코인 트레이딩 봇 V2 - 모듈화된 메인 루프
 """
 import time
 import ccxt
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -28,9 +29,17 @@ class TradingBot:
         """초기화"""
         # 설정 출력
         Config.print_config_summary()
-        
+
+        # 안전장치용 상태 변수 추가
+        self._last_action_time = 0
+        self._position_processing = False
+
+        # 로깅 시스템용 상태 변수
+        self._position_log_count = 0
+        self._max_position_logs = 3
+
         # 데이터베이스 초기화
-        self.recorder = DatabaseRecorder(Config.DB_FILE)
+        self.recorder = DatabaseRecorder(Config.get_db_file())
         
         # Gemini AI 초기화
         self.ai = GeminiInterface(Config.GEMINI_API_KEY)
@@ -44,9 +53,19 @@ class TradingBot:
         print(f"\n=== Bitcoin Trading Bot Started ===")
         print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Mode: {Config.get_trading_mode_display()}")
-        print(f"AI Model: Google Gemini 1.5 Pro")
+        print(f"AI Model: {self.ai.get_model_name()}")
+        print(f"Loop Intervals:")
+        print(f"  - With position: 5s (fast monitoring)")
+        print(f"  - No position: 60s (normal interval)")
+        print("===================================\n")
         print("===================================\n")
     
+    def _clear_screen_lines(self, num_lines: int):
+        """화면에서 지정된 줄 수만큼 삭제"""
+        for _ in range(num_lines):
+            # 커서를 위로 이동하고 해당 줄 삭제
+            print("\033[A\033[K", end="")
+
     def _setup_trading_components(self) -> None:
         """거래 관련 컴포넌트 설정"""
         if Config.is_real_trading():
@@ -54,29 +73,42 @@ class TradingBot:
             self.exchange = ccxt.binance({
                 'apiKey': Config.BINANCE_API_KEY,
                 'secret': Config.BINANCE_SECRET_KEY,
-                **Config.BINANCE_CONFIG
+                **Config.BINANCE_CONFIG  # 여기에 'defaultType': 'future' 포함됨
             })
             self.market_fetcher = MarketFetcher(self.exchange, Config.SERP_API_KEY)
             self.executor = RealExecutor(self.exchange)
+
+            print("🔴 Real trading mode - using FUTURES")
+
         else:
-            # 시뮬레이션 모드
-            self.exchange = ccxt.binance()  # API 키 없이 공개 데이터만 사용
+            # 시뮬레이션 모드 - 선물 설정으로 통일
+            self.exchange = ccxt.binance({
+                'enableRateLimit': True,
+                'options': {
+                    'defaultType': 'future',  # 시뮬레이션도 선물로 설정!
+                    'adjustForTimeDifference': True
+                }
+            })
             self.market_fetcher = MarketFetcher(self.exchange, Config.SERP_API_KEY)
             self.executor = TestExecutor(Config.INITIAL_TEST_BALANCE)
+
+            print("🟡 Test mode - using FUTURES data (simulation)")
+            print(f"📊 Market data will be fetched from futures market")
     
     def run(self) -> None:
-        """메인 트레이딩 루프"""
+        """메인 트레이딩 루프 - 포지션 유무에 따른 간격 조절"""
+        loop_counter = 0
+        
         try:
             while True:
+                loop_counter += 1
                 current_time = datetime.now().strftime('%H:%M:%S')
                 current_price = self.market_fetcher.fetch_current_price()
                 
                 if not current_price:
-                    print("Failed to fetch current price. Retrying...")
-                    time.sleep(Config.POSITION_CHECK_INTERVAL)
+                    print("❌ Failed to fetch current price. Retrying...")
+                    time.sleep(5)
                     continue
-                
-                print(f"\n[{current_time}] Current BTC Price: ${current_price:,.2f}")
                 
                 # 시뮬레이션 모드에서 현재가 업데이트
                 if Config.is_test_trading():
@@ -86,78 +118,129 @@ class TradingBot:
                 position_status = self.executor.check_position_status()
                 
                 if position_status['is_open']:
+                    # 포지션 있을 때: 빠른 모니터링 (5초)
                     self._handle_open_position(position_status, current_price)
+                    sleep_time = 5
                 else:
+                    # 포지션 없을 때: 일반 간격 (60초) - 깔끔한 출력
+                    print(f"\n[{current_time}] Current BTC Price: ${current_price:,.2f}")
                     self._handle_no_position(current_price)
+                    sleep_time = 60
+                    print(f"⏰ No position - next check in {sleep_time}s\n")
                 
                 # 대기
-                time.sleep(Config.MAIN_LOOP_INTERVAL)
+                time.sleep(sleep_time)
                 
         except KeyboardInterrupt:
-            print("\n\nBot stopped by user")
+            print("\n\n🛑 Bot stopped by user")
             self._cleanup()
         except Exception as e:
-            print(f"\nUnexpected error: {e}")
+            print(f"\n💥 Unexpected error: {e}")
             self._cleanup()
     
     def _handle_open_position(self, position_status: dict, current_price: float) -> None:
-        """포지션이 있을 때 처리"""
-        side = position_status['side']
-        amount = position_status['amount']
-        unrealized_pnl = position_status.get('unrealized_pnl', 0)
+        """포지션이 있을 때 처리 - 깔끔한 로깅"""
         
-        print(f"Current Position: {side.upper()} {amount} BTC")
-        print(f"Unrealized P/L: ${unrealized_pnl:+,.2f}")
-        
-        # 데이터베이스에서 현재 거래 정보 확인
-        current_trade = self.recorder.get_latest_open_trade()
-        if not current_trade:
-            print("Warning: Open position found but no trade record in database")
+        # 중복 처리 방지
+        if self._position_processing:
             return
         
-        # 시뮬레이션 모드에서 SL/TP 트리거 확인
-        if Config.is_test_trading():
-            trigger = self.executor.check_sl_tp_triggers(
-                current_price, 
-                current_trade['sl_price'], 
-                current_trade['tp_price']
-            )
+        # 시간 기반 중복 방지 (1초 이내 중복 차단)
+        current_time = time.time()
+        if current_time - self._last_action_time < 1.0:
+            return
+        
+        self._position_processing = True
+        self._last_action_time = current_time
+        
+        try:
+            side = position_status['side']
+            amount = position_status['amount']
+            unrealized_pnl = position_status.get('unrealized_pnl', 0)
             
-            if trigger:
-                print(f"SL/TP triggered: {trigger}")
-                close_result = self.executor.close_position(reason=trigger)
-                if close_result['success']:
-                    self._update_trade_closure(current_trade['id'], close_result)
-                    self.executor.print_position_closed(close_result)
-                    self.recorder.print_trade_summary(days=7)
+            # 로그 카운트 관리
+            self._position_log_count += 1
+            
+            # 3개 초과시 이전 로그 삭제 (queue 방식)
+            if self._position_log_count > self._max_position_logs:
+                # 이전 3줄 삭제 (시간, 포지션 정보, 다음 체크 메시지)
+                self._clear_screen_lines(3)
+            
+            # 현재 상태 출력
+            current_time_str = datetime.now().strftime('%H:%M:%S')
+            print(f"[{current_time_str}] Price: ${current_price:,.2f} | Position: {side.upper()} {amount} BTC | P/L: ${unrealized_pnl:+,.2f}")
+            
+            # 데이터베이스에서 현재 거래 정보 확인
+            current_trade = self.recorder.get_latest_open_trade()
+            if not current_trade:
+                print("⚠️  Warning: Open position found but no trade record in database")
+                return
+            
+            # 시뮬레이션 모드에서 SL/TP 트리거 확인
+            if Config.is_test_trading():
+                trigger = self.executor.check_sl_tp_triggers(
+                    current_price, 
+                    current_trade['sl_price'], 
+                    current_trade['tp_price']
+                )
+                
+                if trigger:
+                    print(f"\n🎯 {trigger.upper()} triggered!")
+                    close_result = self.executor.close_position(reason=trigger)
+                    if close_result['success']:
+                        self._update_trade_closure(current_trade['id'], close_result)
+                        self.executor.print_position_closed(close_result)
+                        self.recorder.print_trade_summary(days=7)
+                        
+                        # 포지션 종료시 로그 카운트 리셋
+                        self._position_log_count = 0
+                    return
+            
+            # 다음 체크 안내 (SL/TP 트리거되지 않은 경우에만)
+            print("📊 Monitoring position - next check in 5s")
+    
+        finally:
+            # 처리 완료 후 플래그 해제
+            self._position_processing = False
     
     def _handle_no_position(self, current_price: float) -> None:
         """포지션이 없을 때 처리"""
+        
+        # 포지션 종료시 로그 카운트 리셋
+        self._position_log_count = 0
+        
+        # 중복 호출 방지
+        if hasattr(self, '_last_no_position_call'):
+            time_diff = time.time() - self._last_no_position_call
+            if time_diff < 1.0:
+                return
+        
+        self._last_no_position_call = time.time()
+        
         # 이전 거래가 종료되었는지 확인
         current_trade = self.recorder.get_latest_open_trade()
         if current_trade:
-            # 실거래에서 포지션 종료된 경우 DB 업데이트
             close_result = {
                 'success': True,
                 'exit_price': current_price,
-                'profit_loss': 0,  # 실제 계산 필요
+                'profit_loss': 0,
                 'profit_loss_percentage': 0
             }
             self._update_trade_closure(current_trade['id'], close_result)
-            print("Previous position closed - updated database")
+            print("✅ Previous position closed - updated database")
         
         # 미체결 주문 취소
         if Config.is_real_trading():
             self.market_fetcher.cancel_all_orders()
         
-        print("No position. Analyzing market...")
+        print("🔍 No position. Analyzing market...")
         time.sleep(5)
         
         # 시장 분석 및 AI 결정
         trading_decision = self._get_ai_decision(current_price)
         
         if trading_decision['direction'] == 'NO_POSITION':
-            print("AI recommends NO_POSITION - waiting...")
+            print("🤖 AI recommends NO_POSITION - waiting...")
             return
         
         # 포지션 진입
