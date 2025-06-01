@@ -21,7 +21,7 @@ class GeminiInterface:
         genai.configure(api_key=api_key)
         
         # 모델 설정
-        self.model_name = 'gemini-2.0-flash-lite'  # 모델명 저장
+        self.model_name = 'gemini-2.0-flash'  # 모델명 저장
         self.model = genai.GenerativeModel(self.model_name)
         
         # 시스템 프롬프트 정의
@@ -139,6 +139,7 @@ IMPORTANT:
             Exception: API 호출 실패 시
         """
         try:
+            
             # 프롬프트 구성
             full_prompt = f"{self.system_prompt}\n\nMarket Data Analysis:\n{json.dumps(market_data, indent=2, default=str)}"
             
