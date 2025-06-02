@@ -1,9 +1,8 @@
 """
-4시간 시장 분석 체인
-- 4시간 봉 중기 추세 분석
-- 주요 구조적 레벨 식별
-- 일일 차트와의 연계 분석
-- 결과 캐싱 (6시간 주기)
+4시간 시장 분석 체인 - 에러 수정
+- DataFrame 생성 안전 처리
+- 변수 스코프 문제 해결
+- 메모리 관리 개선
 """
 import json
 import time
@@ -19,7 +18,7 @@ from utils.db import get_chain_db, log_chain
 
 
 class MarketChain4H:
-    """4시간 시장 분석 체인"""
+    """4시간 시장 분석 체인 - 안정성 개선"""
     
     def __init__(self):
         """초기화"""
@@ -129,8 +128,8 @@ Focus on structural analysis rather than short-term noise. Identify key zones wh
                 return self._error_result("Failed to collect market data")
             
             # 구조적 분석 데이터 계산
-            structure_analysis = self._analyze_structure(market_data["df"])
-            momentum_analysis = self._analyze_momentum(market_data["df"])
+            structure_analysis = self._analyze_structure(market_data["df_4h"])
+            momentum_analysis = self._analyze_momentum(market_data["df_4h"])
             
             # AI 분석
             log_chain("market_4h", "INFO", "Performing 4H structural analysis")
@@ -157,30 +156,66 @@ Focus on structural analysis rather than short-term noise. Identify key zones wh
             return self._error_result(str(e))
     
     def _collect_market_data(self) -> Optional[Dict[str, Any]]:
-        """4시간 시장 데이터 수집"""
+        """4시간 시장 데이터 수집 - 안전성 강화"""
+        df_4h = None
+        df_1d = None
+        
         try:
             symbol = "BTC/USDT:USDT"
             
             # 4시간 봉 데이터 (최근 90개 = 15일)
+            log_chain("market_4h", "INFO", "Fetching 4H OHLCV data")
             ohlcv_4h = self.exchange.fetch_ohlcv(symbol, "4h", limit=90)
-            # 일봉 데이터 (최근 30개 = 30일)
-            ohlcv_1d = self.exchange.fetch_ohlcv(symbol, "1d", limit=30)
             
-            if not ohlcv_4h or not ohlcv_1d:
+            if not ohlcv_4h or len(ohlcv_4h) < 10:
+                log_chain("market_4h", "ERROR", f"Insufficient 4H data: {len(ohlcv_4h) if ohlcv_4h else 0} candles")
                 return None
             
-            # DataFrame 변환
-            df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms')
+            # 일봉 데이터 (최근 30개 = 30일)
+            log_chain("market_4h", "INFO", "Fetching 1D OHLCV data")
+            ohlcv_1d = self.exchange.fetch_ohlcv(symbol, "1d", limit=30)
             
-            df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df_1d['timestamp'] = pd.to_datetime(df_1d['timestamp'], unit='ms')
+            if not ohlcv_1d or len(ohlcv_1d) < 5:
+                log_chain("market_4h", "ERROR", f"Insufficient 1D data: {len(ohlcv_1d) if ohlcv_1d else 0} candles")
+                return None
+            
+            # DataFrame 변환 (안전한 방식)
+            try:
+                df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms')
+                
+                df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df_1d['timestamp'] = pd.to_datetime(df_1d['timestamp'], unit='ms')
+                
+                # 데이터 검증
+                if df_4h.empty or df_1d.empty:
+                    log_chain("market_4h", "ERROR", "Empty DataFrame after conversion")
+                    return None
+                
+                # NaN 값 체크
+                if df_4h.isnull().any().any() or df_1d.isnull().any().any():
+                    log_chain("market_4h", "WARNING", "NaN values detected in data")
+                    df_4h = df_4h.dropna()
+                    df_1d = df_1d.dropna()
+                
+            except Exception as e:
+                log_chain("market_4h", "ERROR", f"DataFrame conversion failed: {e}")
+                return None
             
             # 현재가 조회
-            ticker = self.exchange.fetch_ticker(symbol)
-            current_price = ticker.get('mark', ticker['last'])
+            try:
+                ticker = self.exchange.fetch_ticker(symbol)
+                current_price = ticker.get('mark', ticker['last'])
+                
+                if not current_price or current_price <= 0:
+                    log_chain("market_4h", "ERROR", f"Invalid current price: {current_price}")
+                    return None
+                    
+            except Exception as e:
+                log_chain("market_4h", "ERROR", f"Current price fetch failed: {e}")
+                return None
             
-            return {
+            result = {
                 "df_4h": df_4h,
                 "df_1d": df_1d,
                 "current_price": current_price,
@@ -189,43 +224,74 @@ Focus on structural analysis rather than short-term noise. Identify key zones wh
                 "data_points_1d": len(df_1d)
             }
             
+            log_chain("market_4h", "INFO", f"Market data collected: {len(df_4h)} 4H candles, {len(df_1d)} 1D candles")
+            return result
+            
         except Exception as e:
             log_chain("market_4h", "ERROR", f"Market data collection failed: {e}")
             return None
+        finally:
+            # 메모리 정리는 하지 않음 (사용 중인 데이터이므로)
+            pass
     
     def _analyze_structure(self, df_4h: pd.DataFrame) -> Dict[str, Any]:
-        """시장 구조 분석"""
+        """시장 구조 분석 - 안전한 처리"""
+        structure_data = {}
+        
         try:
+            if df_4h is None or df_4h.empty:
+                log_chain("market_4h", "ERROR", "Empty DataFrame for structure analysis")
+                return {"error": "Empty DataFrame"}
+            
+            # DataFrame 복사본 사용 (원본 보호)
+            df = df_4h.copy()
+            
             # 이동평균들
-            df_4h['ema_20'] = df_4h['close'].ewm(span=20).mean()
-            df_4h['ema_50'] = df_4h['close'].ewm(span=50).mean()
-            df_4h['sma_200'] = df_4h['close'].rolling(window=200).mean() if len(df_4h) >= 200 else df_4h['close'].mean()
+            df['ema_20'] = df['close'].ewm(span=20).mean()
+            df['ema_50'] = df['close'].ewm(span=50).mean()
             
-            # 최근 스윙 고점/저점 찾기 (간단한 방법)
-            recent_data = df_4h.tail(30)  # 최근 30개 캔들
-            highs = recent_data['high'].rolling(window=5, center=True).max()
-            lows = recent_data['low'].rolling(window=5, center=True).min()
+            # 200 SMA (충분한 데이터가 있을 때만)
+            if len(df) >= 200:
+                df['sma_200'] = df['close'].rolling(window=200).mean()
+            else:
+                df['sma_200'] = df['close'].mean()  # 평균값으로 대체
             
-            swing_highs = recent_data[recent_data['high'] == highs]['high'].tolist()
-            swing_lows = recent_data[recent_data['low'] == lows]['low'].tolist()
+            # 최근 스윙 고점/저점 찾기 (안전한 방법)
+            try:
+                recent_data = df.tail(min(30, len(df)))  # 최대 30개 또는 전체 데이터
+                
+                if len(recent_data) >= 5:
+                    highs = recent_data['high'].rolling(window=5, center=True).max()
+                    lows = recent_data['low'].rolling(window=5, center=True).min()
+                    
+                    swing_highs = recent_data[recent_data['high'] == highs]['high'].tolist()
+                    swing_lows = recent_data[recent_data['low'] == lows]['low'].tolist()
+                else:
+                    swing_highs = [recent_data['high'].max()]
+                    swing_lows = [recent_data['low'].min()]
+                    
+            except Exception as e:
+                log_chain("market_4h", "WARNING", f"Swing analysis failed: {e}")
+                swing_highs = [df['high'].max()]
+                swing_lows = [df['low'].min()]
             
-            # 최신 값들
-            latest = df_4h.iloc[-1]
+            # 최신 값들 (안전한 접근)
+            latest = df.iloc[-1]
             
             structure_data = {
                 "current_price": float(latest['close']),
-                "ema_20": float(latest.get('ema_20', 0) or 0),
-                "ema_50": float(latest.get('ema_50', 0) or 0),
-                "sma_200": float(latest.get('sma_200', 0) or 0),
-                "recent_swing_highs": sorted(swing_highs[-3:], reverse=True) if swing_highs else [],
-                "recent_swing_lows": sorted(swing_lows[-3:]) if swing_lows else [],
-                "price_vs_ema20": "above" if latest['close'] > (latest.get('ema_20', 0) or 0) else "below",
-                "ema20_vs_ema50": "above" if (latest.get('ema_20', 0) or 0) > (latest.get('ema_50', 0) or 0) else "below",
-                "distance_from_200sma": float((latest['close'] - (latest.get('sma_200', 0) or latest['close'])) / latest['close'] * 100),
-                "weekly_high": float(df_4h['high'].tail(42).max()),  # 7일 = 42개 4시간봉
-                "weekly_low": float(df_4h['low'].tail(42).min()),
-                "monthly_high": float(df_4h['high'].tail(180).max()) if len(df_4h) >= 180 else float(df_4h['high'].max()),
-                "monthly_low": float(df_4h['low'].tail(180).min()) if len(df_4h) >= 180 else float(df_4h['low'].min())
+                "ema_20": float(latest.get('ema_20', latest['close'])),
+                "ema_50": float(latest.get('ema_50', latest['close'])),
+                "sma_200": float(latest.get('sma_200', latest['close'])),
+                "recent_swing_highs": sorted(swing_highs[-3:], reverse=True) if swing_highs else [float(latest['close'])],
+                "recent_swing_lows": sorted(swing_lows[-3:]) if swing_lows else [float(latest['close'])],
+                "price_vs_ema20": "above" if latest['close'] > latest.get('ema_20', latest['close']) else "below",
+                "ema20_vs_ema50": "above" if latest.get('ema_20', 0) > latest.get('ema_50', 0) else "below",
+                "distance_from_200sma": float((latest['close'] - latest.get('sma_200', latest['close'])) / latest['close'] * 100),
+                "weekly_high": float(df['high'].tail(min(42, len(df))).max()),  # 7일 = 42개 4시간봉
+                "weekly_low": float(df['low'].tail(min(42, len(df))).min()),
+                "monthly_high": float(df['high'].tail(min(180, len(df))).max()),  # 30일 = 180개 4시간봉
+                "monthly_low": float(df['low'].tail(min(180, len(df))).min())
             }
             
             return structure_data
@@ -235,36 +301,60 @@ Focus on structural analysis rather than short-term noise. Identify key zones wh
             return {"error": str(e)}
     
     def _analyze_momentum(self, df_4h: pd.DataFrame) -> Dict[str, Any]:
-        """모멘텀 및 볼륨 분석"""
+        """모멘텀 및 볼륨 분석 - 안전한 처리"""
         try:
-            # RSI 계산
-            delta = df_4h['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
+            if df_4h is None or df_4h.empty:
+                log_chain("market_4h", "ERROR", "Empty DataFrame for momentum analysis")
+                return {"error": "Empty DataFrame"}
             
-            # MACD 계산 (간단한 버전)
-            ema_12 = df_4h['close'].ewm(span=12).mean()
-            ema_26 = df_4h['close'].ewm(span=26).mean()
-            macd_line = ema_12 - ema_26
-            signal_line = macd_line.ewm(span=9).mean()
+            # DataFrame 복사본 사용
+            df = df_4h.copy()
+            
+            # RSI 계산 (안전한 방식)
+            try:
+                delta = df['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=min(14, len(df))).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=min(14, len(df))).mean()
+                
+                # 0으로 나누기 방지
+                rs = gain / loss.replace(0, 1e-10)
+                rsi = 100 - (100 / (1 + rs))
+                
+            except Exception as e:
+                log_chain("market_4h", "WARNING", f"RSI calculation failed: {e}")
+                rsi = pd.Series([50] * len(df), index=df.index)  # 기본값 50
+            
+            # MACD 계산 (안전한 방식)
+            try:
+                ema_12 = df['close'].ewm(span=12).mean()
+                ema_26 = df['close'].ewm(span=26).mean()
+                macd_line = ema_12 - ema_26
+                signal_line = macd_line.ewm(span=9).mean()
+                
+            except Exception as e:
+                log_chain("market_4h", "WARNING", f"MACD calculation failed: {e}")
+                macd_line = pd.Series([0] * len(df), index=df.index)
+                signal_line = pd.Series([0] * len(df), index=df.index)
             
             # 볼륨 분석
-            volume_sma = df_4h['volume'].rolling(window=20).mean()
+            try:
+                volume_sma = df['volume'].rolling(window=min(20, len(df))).mean()
+            except Exception as e:
+                log_chain("market_4h", "WARNING", f"Volume analysis failed: {e}")
+                volume_sma = df['volume']
             
-            # 최신 값들
-            latest = df_4h.iloc[-1]
+            # 최신 값들 (안전한 접근)
+            latest = df.iloc[-1]
             
             momentum_data = {
-                "rsi": float(rsi.iloc[-1] if not rsi.empty else 50),
-                "macd_line": float(macd_line.iloc[-1] if not macd_line.empty else 0),
-                "signal_line": float(signal_line.iloc[-1] if not signal_line.empty else 0),
+                "rsi": float(rsi.iloc[-1] if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50),
+                "macd_line": float(macd_line.iloc[-1] if not macd_line.empty and not pd.isna(macd_line.iloc[-1]) else 0),
+                "signal_line": float(signal_line.iloc[-1] if not signal_line.empty and not pd.isna(signal_line.iloc[-1]) else 0),
                 "macd_histogram": float((macd_line.iloc[-1] - signal_line.iloc[-1]) if not macd_line.empty and not signal_line.empty else 0),
                 "volume_ratio": float(latest['volume'] / volume_sma.iloc[-1] if not volume_sma.empty and volume_sma.iloc[-1] > 0 else 1),
-                "price_change_4h": float((latest['close'] - df_4h.iloc[-2]['close']) / df_4h.iloc[-2]['close'] * 100),
-                "price_change_24h": float((latest['close'] - df_4h.iloc[-7]['close']) / df_4h.iloc[-7]['close'] * 100) if len(df_4h) >= 7 else 0,
-                "price_change_7d": float((latest['close'] - df_4h.iloc[-43]['close']) / df_4h.iloc[-43]['close'] * 100) if len(df_4h) >= 43 else 0,
+                "price_change_4h": float((latest['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close'] * 100) if len(df) >= 2 else 0,
+                "price_change_24h": float((latest['close'] - df.iloc[-7]['close']) / df.iloc[-7]['close'] * 100) if len(df) >= 7 else 0,
+                "price_change_7d": float((latest['close'] - df.iloc[-43]['close']) / df.iloc[-43]['close'] * 100) if len(df) >= 43 else 0,
                 "volume_trend": "increasing" if latest['volume'] > volume_sma.iloc[-1] * 1.2 else "decreasing" if latest['volume'] < volume_sma.iloc[-1] * 0.8 else "normal"
             }
             
@@ -280,8 +370,13 @@ Focus on structural analysis rather than short-term noise. Identify key zones wh
             df_4h = market_data["df_4h"]
             current_price = market_data["current_price"]
             
+            # 에러가 있는지 체크
+            if "error" in structure_data or "error" in momentum_data:
+                log_chain("market_4h", "ERROR", "Structure or momentum analysis failed")
+                return self._fallback_analysis(structure_data, momentum_data, current_price)
+            
             # 최근 4시간 캔들 데이터 (최근 20개)
-            recent_candles = df_4h.tail(20)
+            recent_candles = df_4h.tail(min(20, len(df_4h)))
             candle_text = ""
             
             for idx, row in recent_candles.iterrows():
@@ -349,10 +444,10 @@ Volume Trend: {momentum_data.get('volume_trend', 'normal')}
             
         except json.JSONDecodeError as e:
             log_chain("market_4h", "ERROR", f"Failed to parse AI response: {e}")
-            return self._fallback_analysis(structure_data, momentum_data)
+            return self._fallback_analysis(structure_data, momentum_data, current_price)
         except Exception as e:
             log_chain("market_4h", "ERROR", f"Market analysis failed: {e}")
-            return self._fallback_analysis(structure_data, momentum_data)
+            return self._fallback_analysis(structure_data, momentum_data, current_price)
     
     def _validate_analysis_result(self, result: Dict[str, Any], structure_data: Dict[str, Any], momentum_data: Dict[str, Any]) -> Dict[str, Any]:
         """분석 결과 검증 및 기본값 설정"""
@@ -399,10 +494,10 @@ Volume Trend: {momentum_data.get('volume_trend', 'normal')}
         price_min = current_price * 0.7
         price_max = current_price * 1.3
         
-        if "major_support" in result:
+        if "major_support" in result and isinstance(result["major_support"], list):
             result["major_support"] = [max(price_min, min(price_max, price)) for price in result["major_support"][:2]]
         
-        if "major_resistance" in result:
+        if "major_resistance" in result and isinstance(result["major_resistance"], list):
             result["major_resistance"] = [max(price_min, min(price_max, price)) for price in result["major_resistance"][:2]]
         
         # 유효한 enum 값 검증
@@ -420,9 +515,11 @@ Volume Trend: {momentum_data.get('volume_trend', 'normal')}
         
         return result
     
-    def _fallback_analysis(self, structure_data: Dict[str, Any], momentum_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _fallback_analysis(self, structure_data: Dict[str, Any], momentum_data: Dict[str, Any], current_price: float = None) -> Dict[str, Any]:
         """AI 분석 실패시 폴백 분석"""
-        current_price = structure_data.get('current_price', 50000)
+        if current_price is None:
+            current_price = structure_data.get('current_price', 50000)
+        
         ema_20 = structure_data.get('ema_20', current_price)
         ema_50 = structure_data.get('ema_50', current_price)
         rsi = momentum_data.get('rsi', 50)

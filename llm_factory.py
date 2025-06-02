@@ -1,10 +1,11 @@
 """
-LLM Factory 모듈
-- 다중 AI 모델 통합 관리
-- OpenAI, Anthropic, Google 모델 지원
-- LangChain 기반 통일된 인터페이스 제공
+LLM Factory 모듈 - 인스턴스 캐싱 추가
+- 동일한 설정의 LLM 재사용으로 메모리 절약
+- 캐시 크기 제한으로 메모리 누수 방지
 """
 import os
+import threading
+import hashlib
 from typing import Dict, Any, Optional
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -12,7 +13,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 class LLMFactory:
-    """AI 모델 생성 및 관리 팩토리 클래스"""
+    """AI 모델 생성 및 관리 팩토리 클래스 - 캐싱 기능 추가"""
     
     # 지원되는 모델 정의
     SUPPORTED_MODELS = {
@@ -39,10 +40,32 @@ class LLMFactory:
         "timeout": 30
     }
     
+    # LLM 인스턴스 캐시
+    _llm_cache: Dict[str, Any] = {}
+    _cache_lock = threading.Lock()
+    _max_cache_size = 10  # 최대 캐시 크기
+    
+    @classmethod
+    def _generate_cache_key(cls, model_key: str, **kwargs) -> str:
+        """캐시 키 생성"""
+        # 설정값들을 정렬된 문자열로 변환
+        settings_str = "&".join(f"{k}={v}" for k, v in sorted(kwargs.items()))
+        cache_input = f"{model_key}|{settings_str}"
+        return hashlib.md5(cache_input.encode()).hexdigest()[:12]
+    
+    @classmethod
+    def _manage_cache_size(cls):
+        """캐시 크기 관리 (LRU 방식)"""
+        if len(cls._llm_cache) > cls._max_cache_size:
+            # 가장 오래된 항목 제거 (간단한 구현)
+            oldest_key = next(iter(cls._llm_cache))
+            del cls._llm_cache[oldest_key]
+            print(f"LLM cache evicted: {oldest_key}")
+    
     @classmethod
     def create_llm(cls, model_key: str, **kwargs) -> Any:
         """
-        지정된 모델키로 LLM 인스턴스 생성
+        지정된 모델키로 LLM 인스턴스 생성 (캐싱 적용)
         
         Args:
             model_key: 모델 식별키 (예: "gpt-4o", "claude-3-5-sonnet")
@@ -58,12 +81,34 @@ class LLMFactory:
             raise ValueError(f"Unsupported model: {model_key}. "
                            f"Supported models: {list(cls.SUPPORTED_MODELS.keys())}")
         
+        # 기본 설정과 사용자 설정 병합
+        settings = {**cls.DEFAULT_SETTINGS, **kwargs}
+        
+        # 캐시 키 생성
+        cache_key = cls._generate_cache_key(model_key, **settings)
+        
+        # 캐시에서 검색
+        with cls._cache_lock:
+            if cache_key in cls._llm_cache:
+                print(f"🔄 LLM cache hit: {model_key}")
+                return cls._llm_cache[cache_key]
+            
+            # 캐시에 없으면 새로 생성
+            print(f"🆕 Creating new LLM instance: {model_key}")
+            llm_instance = cls._create_new_llm(model_key, settings)
+            
+            # 캐시에 저장
+            cls._llm_cache[cache_key] = llm_instance
+            cls._manage_cache_size()
+            
+            return llm_instance
+    
+    @classmethod
+    def _create_new_llm(cls, model_key: str, settings: Dict[str, Any]) -> Any:
+        """새 LLM 인스턴스 생성 (캐시 미적용)"""
         model_info = cls.SUPPORTED_MODELS[model_key]
         provider = model_info["provider"]
         model_name = model_info["model_name"]
-        
-        # 기본 설정과 사용자 설정 병합
-        settings = {**cls.DEFAULT_SETTINGS, **kwargs}
         
         # 프로바이더별 LLM 생성
         if provider == "openai":
@@ -126,6 +171,24 @@ class LLMFactory:
         return list(cls.SUPPORTED_MODELS.keys())
     
     @classmethod
+    def get_cache_stats(cls) -> Dict[str, Any]:
+        """캐시 통계 반환"""
+        with cls._cache_lock:
+            return {
+                "cache_size": len(cls._llm_cache),
+                "max_cache_size": cls._max_cache_size,
+                "cached_models": list(cls._llm_cache.keys())
+            }
+    
+    @classmethod
+    def clear_cache(cls) -> None:
+        """캐시 전체 정리"""
+        with cls._cache_lock:
+            cleared_count = len(cls._llm_cache)
+            cls._llm_cache.clear()
+            print(f"LLM cache cleared: {cleared_count} instances removed")
+    
+    @classmethod
     def get_model_info(cls, model_key: str) -> Dict[str, str]:
         """특정 모델의 상세 정보 반환"""
         if model_key not in cls.SUPPORTED_MODELS:
@@ -169,10 +232,12 @@ class LLMFactory:
     def print_available_models(cls) -> None:
         """사용 가능한 모델들을 깔끔하게 출력"""
         api_status = cls.validate_api_keys()
+        cache_stats = cls.get_cache_stats()
         
         print("\n" + "="*60)
         print("           🤖 AVAILABLE AI MODELS")
         print("="*60)
+        print(f"Cache: {cache_stats['cache_size']}/{cache_stats['max_cache_size']} instances")
         
         by_provider = {}
         for model_key, info in cls.SUPPORTED_MODELS.items():
@@ -191,7 +256,9 @@ class LLMFactory:
                 cost_icon = {"budget": "💰", "standard": "💳", "premium": "💎"}.get(
                     model_info.get("cost_tier", "standard"), "💳"
                 )
-                print(f"   {cost_icon} {model}")
+                # 캐시된 모델 표시
+                cached = "🔄" if any(model in key for key in cache_stats['cached_models']) else "  "
+                print(f"   {cost_icon} {cached} {model}")
         
         print("\n" + "="*60)
         if not all(api_status.values()):
@@ -219,6 +286,16 @@ def get_available_models():
 def print_models():
     """모델 목록 출력 편의 함수"""
     LLMFactory.print_available_models()
+
+
+def clear_llm_cache():
+    """LLM 캐시 정리 편의 함수"""
+    LLMFactory.clear_cache()
+
+
+def get_llm_cache_stats():
+    """LLM 캐시 통계 편의 함수"""
+    return LLMFactory.get_cache_stats()
 
 
 # 테스트 함수

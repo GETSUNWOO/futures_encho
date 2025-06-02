@@ -19,7 +19,7 @@ from chains.news_chain import get_latest_news_sentiment
 from chains.market_chain_1h import get_1h_trend, get_1h_support_resistance
 from chains.market_chain_4h import get_4h_trend, get_4h_key_levels, get_swing_opportunity
 from chains.performance_chain import get_current_performance, get_best_direction, get_confidence_by_market_condition
-
+from utils.retry_utils import retry_on_llm_error
 
 class DecisionChain:
     """최종 트레이딩 의사결정 체인"""
@@ -298,6 +298,7 @@ High Volatility Performance: {confidence_conditions.get('high_volatility', 0.5):
             "chain_results": chain_results
         }
     
+    @retry_on_llm_error(max_retries=2)
     def _make_decision(self, market_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """AI 의사결정 실행"""
         try:

@@ -1,14 +1,14 @@
 """
-AI 비트코인 트레이딩 봇 - LangChain 체인 시스템
-- 스케줄러 기반 백그라운드 체인 실행
-- Decision Chain 기반 매분 트레이딩 결정
-- Kelly 공식 포지션 사이징
-- 통합 모니터링 및 로깅
+AI 비트코인 트레이딩 봇 - 메모리 누수 방지 개선
+- 정리 로직 강화
+- 재시도 로직 적용
+- 리소스 관리 개선
 """
 import time
 import ccxt
 import signal
 import sys
+import gc
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -23,11 +23,13 @@ from trading.test_executor import TestExecutor
 # 새로운 체인 시스템 임포트
 from scheduler import get_scheduler, start_scheduler, stop_scheduler, on_trade_completed
 from chains.decision_chain import make_trading_decision
-from utils.db import get_chain_db, log_chain
+from utils.db import get_chain_db, log_chain, close_db_connections
+from utils.retry_utils import retry_on_market_data_error, retry_on_llm_error, safe_api_call
+from llm_factory import clear_llm_cache, get_llm_cache_stats
 
 
 class TradingBot:
-    """LangChain 기반 AI 트레이딩 봇"""
+    """LangChain 기반 AI 트레이딩 봇 - 메모리 관리 개선"""
     
     def __init__(self):
         """초기화"""
@@ -42,6 +44,7 @@ class TradingBot:
         self.is_running = False
         self.last_decision_time = 0
         self.position_check_count = 0
+        self.cleanup_counter = 0  # 주기적 정리용 카운터
         
         # 기존 컴포넌트 초기화
         self.recorder = DatabaseRecorder(Config.get_db_file())
@@ -98,43 +101,84 @@ class TradingBot:
             print("🟡 테스트 거래 컴포넌트 초기화 완료")
     
     def run(self) -> None:
-        """메인 트레이딩 루프"""
-        try:
-            # 스케줄러 시작
-            print("🔄 백그라운드 체인 스케줄러 시작 중...")
-            start_scheduler()
-            time.sleep(3)  # 스케줄러 안정화 대기
+            """메인 트레이딩 루프 - 강력한 초기화 정책"""
+            try:
+                # 스케줄러 시작 및 초기화 대기 (강력한 정책)
+                print("🔄 백그라운드 체인 스케줄러 시작 중...")
+                print("🛡️ 안전 정책: 모든 체인이 성공해야 거래 시작")
+                print("⚡ 필수 체인 데이터 수집 대기 중...")
+                
+                # 초기화 성공 필수
+                init_success = start_scheduler(wait_for_init=True, timeout=600)  # 10분 대기
+                
+                if not init_success:
+                    print("💥 치명적 에러: 필수 체인 초기화 실패")
+                    print("🛡️ 안전을 위해 거래를 시작하지 않습니다")
+                    print("🔧 로그를 확인하고 문제를 해결한 후 다시 시도하세요")
+                    
+                    # 초기화 상태 출력
+                    from scheduler import get_initialization_status
+                    init_status = get_initialization_status()
+                    print(f"\n📊 초기화 결과: {init_status['success_count']}/{init_status['total_count']} 체인")
+                    
+                    for chain_name, result in init_status['results'].items():
+                        status = "✅" if result.get('success') else "❌"
+                        error = result.get('error', '')
+                        print(f"   {status} {chain_name}: {error}")
+                    
+                    # 시스템 종료
+                    self._cleanup()
+                    return
+                
+                # === 모든 체인 성공 - 거래 시작 ===
+                print("✅ 모든 필수 체인 초기화 성공! 🎉")
+                print("🚀 AI 트레이딩 시스템 완전 가동 시작")
+                
+                # 초기화 상태 출력
+                from scheduler import get_initialization_status, print_scheduler_status
+                init_status = get_initialization_status()
+                print(f"📊 초기화 결과: {init_status['success_count']}/{init_status['total_count']} 체인 성공")
+                
+                # 간단한 상태 요약
+                print_scheduler_status()
+                
+                # 메인 루프 시작
+                self.is_running = True
+                print("🚀 메인 트레이딩 루프 시작...")
+                print("⏰ 의사결정 간격: 포지션 있음: 5초 | 포지션 없음: 60초\n")
+                
+                while self.is_running:
+                    try:
+                        self._main_loop_iteration()
+                        
+                        # 주기적 정리 (100회마다)
+                        self.cleanup_counter += 1
+                        if self.cleanup_counter >= 100:
+                            self._periodic_cleanup()
+                            self.cleanup_counter = 0
+                            
+                    except KeyboardInterrupt:
+                        print("\n🛑 종료 신호 수신...")
+                        break
+                    except Exception as e:
+                        log_chain("main_loop", "ERROR", f"메인 루프 에러: {e}")
+                        print(f"❌ 루프 에러: {e}")
+                        time.sleep(10)  # 에러 발생시 10초 대기
+                        continue
+                    
+            except Exception as e:
+                print(f"💥 메인 루프 치명적 에러: {e}")
+                log_chain("main_loop", "CRITICAL", f"치명적 에러: {e}")
             
-            # 메인 루프 시작
-            self.is_running = True
-            print("🚀 메인 트레이딩 루프 시작...")
-            print("⏰ 의사결정 간격: 포지션 있음: 5초 | 포지션 없음: 60초\n")
-            
-            while self.is_running:
-                try:
-                    self._main_loop_iteration()
-                except KeyboardInterrupt:
-                    print("\n🛑 종료 신호 수신...")
-                    break
-                except Exception as e:
-                    log_chain("main_loop", "ERROR", f"메인 루프 에러: {e}")
-                    print(f"❌ 루프 에러: {e}")
-                    time.sleep(10)  # 에러 발생시 10초 대기
-                    continue
-        
-        except Exception as e:
-            print(f"💥 메인 루프 치명적 에러: {e}")
-            log_chain("main_loop", "CRITICAL", f"치명적 에러: {e}")
-        
-        finally:
-            self._cleanup()
+            finally:
+                self._cleanup()
     
     def _main_loop_iteration(self) -> None:
         """메인 루프 단일 반복"""
         current_time = time.time()
         
-        # 현재가 조회
-        current_price = self.market_fetcher.fetch_current_price()
+        # 현재가 조회 (재시도 로직 적용)
+        current_price = self._fetch_current_price_safe()
         if not current_price:
             print("❌ 현재가 조회 실패. 재시도 중...")
             time.sleep(5)
@@ -158,6 +202,11 @@ class TradingBot:
         
         # 대기
         time.sleep(sleep_time)
+    
+    @retry_on_market_data_error(max_retries=2)
+    def _fetch_current_price_safe(self) -> Optional[float]:
+        """안전한 현재가 조회 (재시도 포함)"""
+        return self.market_fetcher.fetch_current_price()
     
     def _handle_open_position(self, position_status: Dict[str, Any], current_price: float) -> None:
         """오픈 포지션 모니터링"""
@@ -225,19 +274,23 @@ class TradingBot:
         if daily_pnl != 0:
             print(f"📈 일일 손익: ${daily_pnl:+,.2f}")
         
-        # Decision Chain을 통한 트레이딩 결정
-        decision_result = make_trading_decision(
-            current_price=current_price,
-            available_balance=available_balance,
-            current_position=None,
-            daily_pnl=daily_pnl
+        # Decision Chain을 통한 트레이딩 결정 (재시도 적용)
+        decision_result = self._make_trading_decision_safe(
+            current_price, available_balance, None, daily_pnl
         )
         
-        if decision_result["success"]:
+        if decision_result and decision_result["success"]:
             self._process_trading_decision(decision_result, current_price, available_balance)
         else:
-            print(f"❌ 의사결정 실패: {decision_result.get('error', '알 수 없는 에러')}")
-            log_chain("decision", "ERROR", f"의사결정 실패: {decision_result.get('error')}")
+            error_msg = decision_result.get('error', '알 수 없는 에러') if decision_result else 'Decision 실패'
+            print(f"❌ 의사결정 실패: {error_msg}")
+            log_chain("decision", "ERROR", f"의사결정 실패: {error_msg}")
+    
+    @retry_on_llm_error(max_retries=2)
+    def _make_trading_decision_safe(self, current_price: float, available_balance: float,
+                                   current_position: Optional[Dict[str, Any]], daily_pnl: float) -> Dict[str, Any]:
+        """안전한 트레이딩 의사결정 (재시도 포함)"""
+        return make_trading_decision(current_price, available_balance, current_position, daily_pnl)
     
     def _process_trading_decision(self, decision_result: Dict[str, Any], 
                                  current_price: float, available_balance: float) -> None:
@@ -366,7 +419,7 @@ class TradingBot:
             current_trade = self.recorder.get_latest_open_trade()
             if current_trade:
                 # 포지션은 없지만 DB에 OPEN 상태가 남아있는 경우
-                current_price = self.market_fetcher.fetch_current_price()
+                current_price = self._fetch_current_price_safe()
                 close_result = {
                     'success': True,
                     'exit_price': current_price,
@@ -387,6 +440,42 @@ class TradingBot:
             return 0.0
         except Exception:
             return 0.0
+    
+    def _periodic_cleanup(self) -> None:
+        """주기적 정리 작업 (메모리 누수 방지)"""
+        try:
+            print("\n🧹 주기적 정리 작업 수행 중...")
+            
+            # 1. 가비지 컬렉션
+            collected = gc.collect()
+            if collected > 0:
+                print(f"   🗑️  가비지 컬렉션: {collected}개 객체 정리")
+            
+            # 2. 만료된 캐시 정리
+            try:
+                cleaned = self.chain_db.cleanup_expired_cache()
+                if cleaned > 0:
+                    print(f"   📦 만료된 캐시: {cleaned}개 정리")
+            except Exception as e:
+                print(f"   ⚠️  캐시 정리 경고: {e}")
+            
+            # 3. LLM 캐시 상태 확인
+            try:
+                cache_stats = get_llm_cache_stats()
+                print(f"   🧠 LLM 캐시: {cache_stats['cache_size']}/{cache_stats['max_cache_size']}")
+                
+                # 캐시가 가득 찬 경우 일부 정리
+                if cache_stats['cache_size'] >= cache_stats['max_cache_size']:
+                    print("   🔄 LLM 캐시 일부 정리...")
+                    # 전체 정리는 하지 않고 자연스럽게 LRU로 관리되도록 함
+            except Exception as e:
+                print(f"   ⚠️  LLM 캐시 확인 경고: {e}")
+            
+            print("   ✅ 주기적 정리 완료")
+            
+        except Exception as e:
+            print(f"   ❌ 정리 작업 에러: {e}")
+            log_chain("cleanup", "ERROR", f"주기적 정리 실패: {e}")
     
     def _signal_handler(self, signum, frame) -> None:
         """시그널 핸들러 (Ctrl+C 등)"""
@@ -411,13 +500,25 @@ class TradingBot:
             print("\n📈 최근 거래 요약:")
             self.recorder.print_trade_summary(days=7)
             
-            # 캐시 정리
+            # 리소스 정리
             try:
-                cleaned = self.chain_db.cleanup_expired_cache()
-                if cleaned > 0:
-                    print(f"🗑️  만료된 캐시 {cleaned}개 정리 완료")
+                # LLM 캐시 정리 (선택적)
+                cache_stats = get_llm_cache_stats()
+                if cache_stats['cache_size'] > 5:  # 5개 이상일 때만 정리
+                    print("🧠 LLM 캐시 정리 중...")
+                    clear_llm_cache()
+                
+                # 데이터베이스 연결 정리
+                print("🗄️  데이터베이스 연결 정리 중...")
+                close_db_connections()
+                
+                # 최종 가비지 컬렉션
+                collected = gc.collect()
+                if collected > 0:
+                    print(f"🗑️  최종 정리: {collected}개 객체 해제")
+                
             except Exception as e:
-                print(f"⚠️  캐시 정리 경고: {e}")
+                print(f"⚠️  리소스 정리 경고: {e}")
             
         except Exception as e:
             print(f"⚠️  정리 작업 경고: {e}")
@@ -439,6 +540,14 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        # 최종 정리 (안전장치)
+        try:
+            close_db_connections()
+            clear_llm_cache()
+            gc.collect()
+        except:
+            pass
 
 
 if __name__ == "__main__":

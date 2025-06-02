@@ -1,20 +1,106 @@
 """
-데이터베이스 헬퍼 유틸리티
-- 체인 결과 저장/조회
-- 캐시 관리
-- 성과 데이터 집계
-- 기존 database/recorder.py 확장
+데이터베이스 헬퍼 유틸리티 - 연결 관리 개선
+- SQLite 연결 풀링 추가
+- 연결 재사용으로 메모리 누수 방지
 """
 import sqlite3
 import json
+import threading
+import queue
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 from contextlib import contextmanager
 from config import Config
 
 
+class ConnectionPool:
+    """SQLite 연결 풀"""
+    
+    def __init__(self, db_file: str, max_connections: int = 5):
+        self.db_file = db_file
+        self.max_connections = max_connections
+        self.pool = queue.Queue(maxsize=max_connections)
+        self.created_connections = 0
+        self.lock = threading.Lock()
+        
+        # 초기 연결 생성
+        self._create_initial_connections()
+    
+    def _create_initial_connections(self):
+        """초기 연결 2개 생성"""
+        for _ in range(min(2, self.max_connections)):
+            conn = self._create_connection()
+            self.pool.put(conn)
+    
+    def _create_connection(self) -> sqlite3.Connection:
+        """새 연결 생성"""
+        conn = sqlite3.connect(
+            self.db_file,
+            check_same_thread=False,  # 멀티스레드 사용
+            timeout=30.0
+        )
+        conn.row_factory = sqlite3.Row
+        # WAL 모드로 동시성 개선
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        self.created_connections += 1
+        return conn
+    
+    @contextmanager
+    def get_connection(self):
+        """연결 가져오기 (컨텍스트 매니저)"""
+        conn = None
+        try:
+            # 풀에서 연결 가져오기
+            try:
+                conn = self.pool.get_nowait()
+            except queue.Empty:
+                # 풀이 비어있으면 새 연결 생성
+                with self.lock:
+                    if self.created_connections < self.max_connections:
+                        conn = self._create_connection()
+                    else:
+                        # 최대 연결 수 도달시 대기
+                        conn = self.pool.get(timeout=5.0)
+            
+            # 연결 유효성 검사
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except sqlite3.Error:
+                # 연결이 끊어진 경우 새로 생성
+                conn.close()
+                conn = self._create_connection()
+            
+            yield conn
+            
+        except Exception:
+            if conn:
+                conn.rollback()
+            raise
+        finally:
+            if conn:
+                try:
+                    # 연결을 풀에 반환
+                    self.pool.put_nowait(conn)
+                except queue.Full:
+                    # 풀이 가득 찬 경우 연결 닫기
+                    conn.close()
+                    self.created_connections -= 1
+    
+    def close_all(self):
+        """모든 연결 종료"""
+        while not self.pool.empty():
+            try:
+                conn = self.pool.get_nowait()
+                conn.close()
+                self.created_connections -= 1
+            except queue.Empty:
+                break
+
+
 class ChainDB:
-    """체인 시스템용 데이터베이스 헬퍼"""
+    """체인 시스템용 데이터베이스 헬퍼 - 연결 풀링 적용"""
     
     def __init__(self, db_file: Optional[str] = None):
         """
@@ -24,20 +110,12 @@ class ChainDB:
             db_file: 데이터베이스 파일 경로 (None이면 config에서 가져옴)
         """
         self.db_file = db_file or Config.get_db_file()
+        self.connection_pool = ConnectionPool(self.db_file)
         self._setup_tables()
     
-    @contextmanager
     def get_connection(self):
-        """데이터베이스 연결 컨텍스트 매니저"""
-        conn = sqlite3.connect(self.db_file)
-        conn.row_factory = sqlite3.Row  # dict-like 접근 가능
-        try:
-            yield conn
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        """연결 풀에서 연결 가져오기"""
+        return self.connection_pool.get_connection()
     
     def _setup_tables(self) -> None:
         """체인 시스템용 테이블 생성"""
@@ -158,7 +236,7 @@ class ChainDB:
             conn.commit()
     
     # =========================================================================
-    # 체인 결과 저장/조회
+    # 체인 결과 저장/조회 (기존 메서드들 유지, 연결만 풀 사용)
     # =========================================================================
     
     def save_chain_result(
@@ -169,19 +247,7 @@ class ChainDB:
         model_used: Optional[str] = None,
         processing_time: Optional[float] = None
     ) -> int:
-        """
-        체인 실행 결과 저장
-        
-        Args:
-            chain_name: 체인 이름
-            result_data: 결과 데이터
-            ttl_seconds: 캐시 유효 시간 (초)
-            model_used: 사용된 모델
-            processing_time: 처리 시간
-            
-        Returns:
-            저장된 레코드 ID
-        """
+        """체인 실행 결과 저장"""
         timestamp = datetime.now().isoformat()
         expiry_time = None
         
@@ -206,16 +272,7 @@ class ChainDB:
             return cursor.lastrowid
     
     def get_latest_chain_result(self, chain_name: str, max_age_seconds: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        """
-        최신 체인 결과 조회
-        
-        Args:
-            chain_name: 체인 이름
-            max_age_seconds: 최대 나이 (초)
-            
-        Returns:
-            체인 결과 또는 None
-        """
+        """최신 체인 결과 조회"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -250,14 +307,10 @@ class ChainDB:
                 }
             return None
     
-    # =========================================================================
-    # 특화 테이블 메서드들
-    # =========================================================================
-    
     def save_news_summary(self, articles_count: int, summary_data: Dict[str, Any], sentiment_score: float) -> int:
         """뉴스 요약 저장"""
         timestamp = datetime.now().isoformat()
-        expiry_time = (datetime.now() + timedelta(hours=4)).isoformat()  # 4시간 후 만료
+        expiry_time = (datetime.now() + timedelta(hours=4)).isoformat()
         
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -292,7 +345,6 @@ class ChainDB:
     def save_trend_summary(self, timeframe: str, trend_data: Dict[str, Any], confidence: float) -> int:
         """시장 추세 요약 저장"""
         timestamp = datetime.now().isoformat()
-        # 타임프레임에 따른 만료 시간 설정
         ttl_hours = {"1h": 1.5, "4h": 6}.get(timeframe, 2)
         expiry_time = (datetime.now() + timedelta(hours=ttl_hours)).isoformat()
         
@@ -328,7 +380,7 @@ class ChainDB:
     def save_performance_summary(self, summary_data: Dict[str, Any]) -> int:
         """성과 요약 저장"""
         timestamp = datetime.now().isoformat()
-        expiry_time = (datetime.now() + timedelta(hours=2)).isoformat()  # 2시간 후 만료
+        expiry_time = (datetime.now() + timedelta(hours=2)).isoformat()
         
         total_trades = summary_data.get('total_trades', 0)
         win_rate = summary_data.get('win_rate', 0.0)
@@ -366,10 +418,6 @@ class ChainDB:
                 }
             return None
     
-    # =========================================================================
-    # 캐시 관리
-    # =========================================================================
-    
     def cleanup_expired_cache(self) -> int:
         """만료된 캐시 데이터 정리"""
         current_time = datetime.now().isoformat()
@@ -388,35 +436,6 @@ class ChainDB:
         
         return deleted_count
     
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """캐시 통계 조회"""
-        current_time = datetime.now().isoformat()
-        
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            stats = {}
-            tables = ['chain_results', 'news_summary', 'trend_summary', 'performance_summary']
-            
-            for table in tables:
-                cursor.execute(f'SELECT COUNT(*) as total FROM {table}')
-                total = cursor.fetchone()['total']
-                
-                cursor.execute(f'SELECT COUNT(*) as valid FROM {table} WHERE expiry_time > ? OR expiry_time IS NULL', (current_time,))
-                valid = cursor.fetchone()['valid']
-                
-                stats[table] = {
-                    'total_records': total,
-                    'valid_records': valid,
-                    'expired_records': total - valid
-                }
-        
-        return stats
-    
-    # =========================================================================
-    # 로깅
-    # =========================================================================
-    
     def log_chain_event(self, chain_name: str, level: str, message: str) -> None:
         """체인 이벤트 로깅"""
         timestamp = datetime.now().isoformat()
@@ -432,29 +451,9 @@ class ChainDB:
         except Exception as e:
             print(f"Failed to log chain event: {e}")
     
-    def get_recent_logs(self, chain_name: Optional[str] = None, hours: int = 24) -> List[Dict[str, Any]]:
-        """최근 로그 조회"""
-        cutoff_time = (datetime.now() - timedelta(hours=hours)).isoformat()
-        
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            if chain_name:
-                cursor.execute('''
-                SELECT chain_name, timestamp, log_level, message
-                FROM chain_logs
-                WHERE chain_name = ? AND timestamp > ?
-                ORDER BY timestamp DESC LIMIT 100
-                ''', (chain_name, cutoff_time))
-            else:
-                cursor.execute('''
-                SELECT chain_name, timestamp, log_level, message
-                FROM chain_logs
-                WHERE timestamp > ?
-                ORDER BY timestamp DESC LIMIT 100
-                ''', (cutoff_time,))
-            
-            return [dict(row) for row in cursor.fetchall()]
+    def close(self):
+        """연결 풀 종료"""
+        self.connection_pool.close_all()
 
 
 # 전역 인스턴스 (싱글톤 패턴)
@@ -468,17 +467,6 @@ def get_chain_db() -> ChainDB:
     return _chain_db_instance
 
 
-# 편의 함수들
-def save_chain_result(chain_name: str, result_data: Dict[str, Any], **kwargs) -> int:
-    """체인 결과 저장 편의 함수"""
-    return get_chain_db().save_chain_result(chain_name, result_data, **kwargs)
-
-
-def get_latest_result(chain_name: str, **kwargs) -> Optional[Dict[str, Any]]:
-    """최신 체인 결과 조회 편의 함수"""
-    return get_chain_db().get_latest_chain_result(chain_name, **kwargs)
-
-
 def cleanup_cache() -> int:
     """캐시 정리 편의 함수"""
     return get_chain_db().cleanup_expired_cache()
@@ -487,3 +475,11 @@ def cleanup_cache() -> int:
 def log_chain(chain_name: str, level: str, message: str) -> None:
     """체인 로깅 편의 함수"""
     get_chain_db().log_chain_event(chain_name, level, message)
+
+
+def close_db_connections():
+    """DB 연결 정리 (프로그램 종료시 호출)"""
+    global _chain_db_instance
+    if _chain_db_instance:
+        _chain_db_instance.close()
+        _chain_db_instance = None

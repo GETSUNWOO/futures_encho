@@ -16,7 +16,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from config import Config
 from llm_factory import create_llm
 from utils.db import get_chain_db, log_chain
-
+from utils.retry_utils import retry_on_llm_error
 
 class NewsChain:
     """뉴스 수집 및 분석 체인"""
@@ -237,6 +237,7 @@ Use trading_relevance: 0.0-0.3 (low), 0.3-0.7 (medium), 0.7-1.0 (high)"""),
             log_chain("news", "ERROR", f"RSS collection error: {e}")
             return []
     
+    @retry_on_llm_error(max_retries=2)
     def _analyze_news(self, articles: List[Dict[str, str]]) -> Dict[str, Any]:
         """AI를 통한 뉴스 분석"""
         try:
