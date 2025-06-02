@@ -17,12 +17,10 @@ class MarketFetcher:
         """
         초기화
         
-         Args:
+        Args:
             exchange: ccxt 거래소 객체
-            serp_api_key: SERP API 키 (뉴스 수집용)
         """
         self.exchange = exchange
-        self.serp_api_key = serp_api_key
         
         # 거래소 타입에 따라 심볼 설정 (RealExecutor와 동일하게)
         if hasattr(exchange, 'options') and exchange.options.get('defaultType') == 'future':
@@ -33,13 +31,6 @@ class MarketFetcher:
             self.symbol = "BTC/USDT"       # 현물 심볼
             self.is_futures = False
             print("📊 MarketFetcher initialized for SPOT")
-        
-        # 기존 타임프레임 설정...
-        self.timeframes = {
-            "15m": {"timeframe": "15m", "limit": 96},
-            "1h": {"timeframe": "1h", "limit": 48},    
-            "4h": {"timeframe": "4h", "limit": 30}
-        }
     
     def fetch_current_price(self) -> float:
         """
@@ -147,86 +138,6 @@ class MarketFetcher:
             
         except Exception as e:
             print(f"Debug error: {e}")
-    
-    def fetch_multi_timeframe_data(self) -> Dict[str, pd.DataFrame]:
-        """
-        여러 타임프레임의 가격 데이터를 수집
-        
-        Returns:
-            타임프레임별 DataFrame 데이터
-        """
-        multi_tf_data = {}
-        
-        for tf_name, tf_params in self.timeframes.items():
-            try:
-                # OHLCV 데이터 가져오기
-                ohlcv = self.exchange.fetch_ohlcv(
-                    self.symbol, 
-                    timeframe=tf_params["timeframe"], 
-                    limit=tf_params["limit"]
-                )
-                
-                # 데이터프레임으로 변환
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                
-                multi_tf_data[tf_name] = df
-                print(f"Collected {tf_name} data: {len(df)} candles")
-                
-            except Exception as e:
-                print(f"Error fetching {tf_name} data: {e}")
-                multi_tf_data[tf_name] = pd.DataFrame()  # 빈 DataFrame 반환
-        
-        return multi_tf_data
-    
-    def fetch_bitcoin_news(self, limit: int = 10) -> List[Dict[str, str]]:
-        """
-        비트코인 관련 최신 뉴스를 가져옴
-        
-        Args:
-            limit: 가져올 뉴스 개수
-            
-        Returns:
-            뉴스 기사 정보 리스트 (제목과 날짜만 포함)
-        """
-        if not self.serp_api_key:
-            print("SERP API key not provided. Skipping news fetch.")
-            return []
-            
-        try:
-            url = "https://serpapi.com/search.json"
-            params = {
-                "engine": "google_news",
-                "q": "bitcoin",
-                "gl": "us",
-                "hl": "en", 
-                "api_key": self.serp_api_key
-            }
-            
-            response = requests.get(url, params=params)
-            
-            if response.status_code == 200:
-                data = response.json()
-                news_results = data.get("news_results", [])
-                
-                # 최신 뉴스만 추출하고 제목과 날짜만 포함
-                recent_news = []
-                for news in news_results[:limit]:
-                    news_item = {
-                        "title": news.get("title", ""),
-                        "date": news.get("date", "")
-                    }
-                    recent_news.append(news_item)
-                
-                print(f"Collected {len(recent_news)} recent news articles")
-                return recent_news
-            else:
-                print(f"Error fetching news: Status code {response.status_code}")
-                return []
-                
-        except Exception as e:
-            print(f"Error fetching news: {e}")
-            return []
     
     def get_current_positions(self) -> Dict[str, any]:
         """
