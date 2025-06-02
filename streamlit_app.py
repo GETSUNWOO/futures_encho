@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import ccxt  # 암호화폐 거래소 API 라이브러리
 import numpy as np
+import os
 
 # 페이지 설정
 st.set_page_config(
@@ -13,6 +14,39 @@ st.set_page_config(
     page_icon="📈",
     layout="wide"
 )
+# Config import 추가
+try:
+    from config import Config
+    
+    # 현재 모드 확인
+    current_mode = "REAL" if Config.is_real_trading() else "TEST"
+    db_file = Config.get_db_file()
+    mode_icon = "🔴" if Config.is_real_trading() else "🟡"
+    mode_color = "#ff4444" if Config.is_real_trading() else "#ffaa00"
+    
+    # 상단에 모드 표시 (눈에 띄게)
+    st.markdown(f"""
+    <div style="
+        background-color: {mode_color}20;
+        border: 2px solid {mode_color};
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 20px;
+        text-align: center;
+    ">
+        <h3 style="color: {mode_color}; margin: 0;">
+            {mode_icon} {current_mode} MODE DASHBOARD
+        </h3>
+        <p style="margin: 5px 0 0 0; color: #666;">
+            Database: <code>{os.path.basename(db_file)}</code>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+except ImportError:
+    # Config를 import할 수 없는 경우 기본 표시
+    st.warning("⚠️ Unable to detect trading mode. Using default database.")
+    db_file = "bitcoin_trading.db"
 
 # 기본 스타일
 st.markdown("""
@@ -76,8 +110,15 @@ st.markdown("""
 
 # SQLite 데이터베이스에서 데이터를 읽는 함수들
 def get_trades_data():
-    # 새로운 연결을 만들어 현재 스레드에서 사용
-    conn = sqlite3.connect("bitcoin_trading.db")
+    from config import Config
+    db_file = Config.get_db_file()
+    
+    if not os.path.exists(db_file):
+        st.error(f"📁 Database file not found: {db_file}")
+        st.info("💡 Please run the trading bot first to generate data.")
+        return pd.DataFrame()
+    
+    conn = sqlite3.connect(db_file)
     query = """
     SELECT 
         id, timestamp, action, entry_price, exit_price, amount, leverage, 

@@ -17,7 +17,7 @@ class MarketFetcher:
         """
         초기화
         
-        Args:
+         Args:
             exchange: ccxt 거래소 객체
             serp_api_key: SERP API 키 (뉴스 수집용)
         """
@@ -27,9 +27,11 @@ class MarketFetcher:
         # 거래소 타입에 따라 심볼 설정 (RealExecutor와 동일하게)
         if hasattr(exchange, 'options') and exchange.options.get('defaultType') == 'future':
             self.symbol = "BTC/USDT:USDT"  # 선물 심볼
+            self.is_futures = True
             print("📊 MarketFetcher initialized for FUTURES")
         else:
             self.symbol = "BTC/USDT"       # 현물 심볼
+            self.is_futures = False
             print("📊 MarketFetcher initialized for SPOT")
         
         # 기존 타임프레임 설정...

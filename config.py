@@ -30,6 +30,15 @@ class Config:
     BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
     SERP_API_KEY = os.getenv("SERP_API_KEY")
     
+    # Binance 기본 설정
+    BINANCE_CONFIG = {
+        'enableRateLimit': True,
+        'options': {
+            'defaultType': 'future',
+            'adjustForTimeDifference': True
+        }
+    }
+    
     # 기존 Gemini 키 (하위 호환성)
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     
@@ -44,10 +53,10 @@ class Config:
     
     # 체인별 모델 설정
     CHAIN_MODELS = {
-        "decision": os.getenv("DECISION_MODEL", "gpt-4o"),
+        "decision": os.getenv("DECISION_MODEL", "gemini-1.5-flash"),
         "news": os.getenv("NEWS_MODEL", "gemini-1.5-flash"),
-        "market_1h": os.getenv("MARKET_1H_MODEL", "claude-3-5-haiku"),
-        "market_4h": os.getenv("MARKET_4H_MODEL", "claude-3-5-sonnet"),
+        "market_1h": os.getenv("MARKET_1H_MODEL", "gemini-1.5-flash"),
+        "market_4h": os.getenv("MARKET_4H_MODEL", "gemini-1.5-flash"),
         "performance": os.getenv("PERFORMANCE_MODEL", "gemini-1.5-flash")
     }
     
@@ -145,12 +154,6 @@ class Config:
         if not any(ai_keys):
             errors.append("At least one AI API key is required (OpenAI, Anthropic, or Google)")
         
-        # 체인 모델 검증
-        from llm_factory import LLMFactory
-        for chain, model in cls.CHAIN_MODELS.items():
-            if model not in LLMFactory.get_supported_models():
-                errors.append(f"Unsupported model '{model}' for {chain} chain")
-        
         # 켈리 설정 검증
         kelly = cls.KELLY_SETTINGS
         if not (0 < kelly["max_position_size"] <= 1):
@@ -170,6 +173,14 @@ class Config:
     def is_test_trading(cls) -> bool:
         """시뮬레이션 모드 여부 확인"""
         return cls.TRADING_MODE == "TEST"
+    
+    @classmethod
+    def get_trading_mode_display(cls) -> str:
+        """트레이딩 모드 표시용 문자열 반환"""
+        if cls.is_real_trading():
+            return "🔴 REAL TRADING"
+        else:
+            return "🟡 TEST TRADING"
     
     @classmethod
     def get_chain_model(cls, chain_name: str) -> str:

@@ -53,10 +53,19 @@ class ChainDB:
                 result_data TEXT NOT NULL,
                 expiry_time TEXT,
                 model_used TEXT,
-                processing_time REAL,
-                INDEX(chain_name, timestamp),
-                INDEX(expiry_time)
+                processing_time REAL
             )
+            ''')
+            
+            # 체인 결과 테이블 인덱스
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_chain_results_name_time 
+            ON chain_results(chain_name, timestamp)
+            ''')
+            
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_chain_results_expiry 
+            ON chain_results(expiry_time)
             ''')
             
             # 뉴스 요약 테이블
@@ -67,10 +76,19 @@ class ChainDB:
                 articles_count INTEGER NOT NULL,
                 summary_data TEXT NOT NULL,
                 sentiment_score REAL,
-                expiry_time TEXT NOT NULL,
-                INDEX(timestamp),
-                INDEX(expiry_time)
+                expiry_time TEXT NOT NULL
             )
+            ''')
+            
+            # 뉴스 요약 테이블 인덱스
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_news_summary_timestamp 
+            ON news_summary(timestamp)
+            ''')
+            
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_news_summary_expiry 
+            ON news_summary(expiry_time)
             ''')
             
             # 시장 추세 요약 테이블
@@ -81,10 +99,19 @@ class ChainDB:
                 timestamp TEXT NOT NULL,
                 trend_data TEXT NOT NULL,
                 confidence REAL,
-                expiry_time TEXT NOT NULL,
-                INDEX(timeframe, timestamp),
-                INDEX(expiry_time)
+                expiry_time TEXT NOT NULL
             )
+            ''')
+            
+            # 시장 추세 테이블 인덱스
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_trend_summary_timeframe_time 
+            ON trend_summary(timeframe, timestamp)
+            ''')
+            
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_trend_summary_expiry 
+            ON trend_summary(expiry_time)
             ''')
             
             # 성과 요약 테이블
@@ -96,10 +123,19 @@ class ChainDB:
                 total_trades INTEGER,
                 win_rate REAL,
                 avg_return REAL,
-                expiry_time TEXT NOT NULL,
-                INDEX(timestamp),
-                INDEX(expiry_time)
+                expiry_time TEXT NOT NULL
             )
+            ''')
+            
+            # 성과 요약 테이블 인덱스
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_performance_summary_timestamp 
+            ON performance_summary(timestamp)
+            ''')
+            
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_performance_summary_expiry 
+            ON performance_summary(expiry_time)
             ''')
             
             # 실행 로그 테이블 (디버깅용)
@@ -109,9 +145,14 @@ class ChainDB:
                 chain_name TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 log_level TEXT NOT NULL,
-                message TEXT NOT NULL,
-                INDEX(chain_name, timestamp)
+                message TEXT NOT NULL
             )
+            ''')
+            
+            # 로그 테이블 인덱스
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_chain_logs_name_time 
+            ON chain_logs(chain_name, timestamp)
             ''')
             
             conn.commit()
