@@ -5,3 +5,10 @@ pandas # 데이터 처리
 streamlit
 plotly
 requests # HTTP 요청 (뉴스 API용)
+langchain
+langchain-google-genai  # Gemini 연동 시
+langchain-openai        # OpenAI 연동 시
+langchain-anthropic     # Claude 연동 시 (필요한 경우)
+pydantic                # OutputParser 쓸 경우 (v1 또는 v2)
+apscheduler             # chain scheduler
+# pip install --upgrade langchain 랭체인 업그레이드
